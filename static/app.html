@@ -1,0 +1,95 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8"/>
+    <title>Mood Playlists</title>
+    <link rel="icon" href="/static/favicon.ico">
+    <style>
+      body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:800px;margin:32px auto;padding:0 16px}
+      label{display:block;margin:12px 0}
+      button{padding:8px 14px;cursor:pointer}
+      pre{background:#f6f8fa;border:1px solid #e5e7eb;padding:12px;border-radius:8px;white-space:pre-wrap}
+    </style>
+  </head>
+  <body>
+    <h2>Create a Mood Playlist</h2>
+    <div id="me">Checking login…</div>
+
+    <form id="f" action="/api/playlist" method="post">
+      <label>Mood:
+        <select name="mood" id="mood"></select>
+      </label>
+      <label>Genre (optional): <input name="genre" placeholder="e.g. house"></label>
+      <label>Count: <input type="number" name="limit" value="20" min="5" max="100"></label>
+      <button type="submit">Generate</button>
+    </form>
+
+    <h3>Result</h3>
+    <pre id="out">Nothing yet.</pre>
+
+    <script>
+      async function boot() {
+        const out = document.getElementById('out');
+
+        // Load mood options
+        try {
+          const moods = await fetch('/api/moods').then(r => r.json());
+          const sel = document.getElementById('mood');
+          Object.keys(moods).forEach(m => {
+            const o = document.createElement('option'); o.value=m; o.textContent=m;
+            sel.appendChild(o);
+          });
+        } catch (e) {
+          out.textContent = 'Failed to load moods: ' + e;
+        }
+
+        // Show who’s logged in (cookie check)
+        try {
+          const meRes = await fetch('/api/me');
+          if (meRes.ok) {
+            const me = await meRes.json();
+            document.getElementById('me').textContent = `Logged in as ${me.display_name}`;
+          } else {
+            const txt = await meRes.text();
+            document.getElementById('me').innerHTML =
+              `Not logged in (${meRes.status}). <a href="/">Go to login</a><br><small>${txt}</small>`;
+          }
+        } catch (e) {
+          document.getElementById('me').textContent = 'Login check failed: ' + e;
+        }
+
+        // Handle Generate
+        document.getElementById('f').addEventListener('submit', async (e) => {
+          e.preventDefault();
+          out.textContent = 'Working...';
+          try {
+            const fd = new FormData(e.target);
+            const res = await fetch('/api/playlist', { method: 'POST', body: fd });
+            const txt = await res.text();
+
+            // Try parse JSON first; otherwise show raw response
+            try {
+              const json = JSON.parse(txt);
+              out.textContent = JSON.stringify(json, null, 2);
+              if (json.playlist_url) {
+                const a = document.createElement('a');
+                a.href = json.playlist_url;
+                a.target = '_blank';
+                a.textContent = 'Open playlist in Spotify';
+                out.appendChild(document.createElement('br'));
+                out.appendChild(a);
+              }
+            } catch {
+              out.textContent = `Server replied ${res.status} ${res.statusText}:\n${txt}`;
+            }
+          } catch (err) {
+            out.textContent = 'Request failed: ' + err;
+          }
+        });
+      }
+      boot();
+    </script>
+  </body>
+</html>
+
+

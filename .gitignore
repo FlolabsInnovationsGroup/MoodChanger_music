@@ -1,0 +1,17 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual env
+.venv/
+
+# Env & tokens
+.env
+tokens.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
