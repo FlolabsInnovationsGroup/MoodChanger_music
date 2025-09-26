@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Mood Playlists</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 900px; color:#111; }
+    h1 { margin-top: 0; }
+    label { display:block; margin:.5rem 0 .25rem; font-weight:600; }
+    input, select, button { padding:.5rem; font-size:1rem; }
+    .row { display:flex; gap:1rem; align-items:flex-start; flex-wrap:wrap; }
+    .stack { display:grid; gap:.5rem; }
+    fieldset { border:1px solid #ddd; border-radius:8px; padding:.75rem 1rem; }
+    legend { padding:0 .4rem; color:#444; }
+    .hidden { display:none !important; }
+    #out { margin-top:1rem; padding:1rem; border:1px solid #ddd; border-radius:8px; }
+    code { background:#f6f8fa; padding:.2rem .4rem; border-radius:4px; }
+    small.hint { color:#555; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; }
+    button { border-radius:8px; border:1px solid #ccc; background:#fafafa; cursor:pointer; }
+    button:hover { background:#f0f0f0; }
+
+    /* Tags (neutral) */
+    .tags { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .tag { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; border:1px solid #ddd; background:#f7f7f7; }
+    .tag button { all:unset; cursor:pointer; font-weight:700; line-height:1; padding:0 4px; }
+
+    /* --- "Same UI" listbox-style checkbox panel --- */
+    .selectlike {
+      border:1px solid #c7c7c7;
+      border-radius:6px;
+      background:#fff;
+      max-height: 384px; /* ~12 rows, like size="12" */
+      overflow:auto;
+      padding:0;
+    }
+    .cb-group { margin:0; border:0; padding:0; }
+    .cb-group + .cb-group { border-top:1px solid #eee; }
+    .cb-group > legend {
+      position: sticky; top: 0; z-index: 1;
+      background:#fff; color:#555; font-size:.9rem;
+      padding:6px 8px; margin:0; border-bottom:1px dashed #eee;
+    }
+    .cb-list { list-style:none; margin:0; padding:0; }
+    .cb-item { margin:0; }
+    .cb-label {
+      display:flex; align-items:center; gap:8px;
+      height:32px; padding:0 8px;
+      cursor:pointer; user-select:none;
+      background:transparent;
+    }
+    .cb-label input { margin:0; }
+    .cb-label:hover { background:#f3f4f6; }
+    .cb-label.is-checked { background:#e7f0ff; }
+    .cb-label:focus-within { outline:2px solid #8cb8ff; outline-offset:-2px; }
+
+    .cb-item.hidden { display:none; }
+    .cb-group.hidden { display:none; }
+  </style>
+</head>
+<body>
+  <h1>Mood Playlists</h1>
+
+  <!-- Auth UI -->
+  <div id="auth" style="margin-bottom:12px; display:flex; align-items:center; gap:.5rem;">
+    <a id="loginLink" href="/login">Login with Spotify</a>
+    <span id="whoami" style="color:#555;"></span>
+    <button id="switchBtn" type="button" style="display:none;">Switch account</button>
+    <button id="logoutBtn" type="button" style="display:none;">Sign out</button>
+  </div>
+
+  <script>
+    const whoamiEl = document.getElementById('whoami');
+    const loginLinkEl = document.getElementById('loginLink');
+    const logoutBtnEl = document.getElementById('logoutBtn');
+    const switchBtnEl = document.getElementById('switchBtn');
+
+    function makeLoginUrl(extraParams = {}) {
+      // Build a URL based on the login link, preserving base path
+      const url = new URL(loginLinkEl.getAttribute('href'), location.href);
+      Object.entries(extraParams).forEach(([k, v]) => url.searchParams.set(k, v));
+      return url.toString();
+    }
+
+    async function refreshAuthUI() {
+      try {
+        const res = await fetch('/api/me', { credentials: 'include' });
+        if (!res.ok) throw new Error();
+        const me = await res.json();
+        whoamiEl.textContent = `Logged in as ${me.display_name || me.id}`;
+        loginLinkEl.style.display = 'none';
+        logoutBtnEl.style.display = 'inline-block';
+        switchBtnEl.style.display = 'inline-block';
+      } catch {
+        whoamiEl.textContent = '';
+        loginLinkEl.style.display = 'inline';
+        logoutBtnEl.style.display = 'none';
+        switchBtnEl.style.display = 'none';
+      }
+    }
+
+    async function signOut({ refresh = true } = {}) {
+      // Try a few common endpoints; ignore failures and just refresh UI.
+      const candidates = [
+        { url: '/logout', method: 'POST' },
+        { url: '/logout', method: 'GET' },
+        { url: '/api/logout', method: 'POST' },
+        { url: '/api/logout', method: 'GET' },
+        { url: '/auth/logout', method: 'POST' },
+      ];
+      logoutBtnEl.disabled = true;
+      switchBtnEl.disabled = true;
+
+      const originalLogout = logoutBtnEl.textContent;
+      const originalSwitch = switchBtnEl.textContent;
+      logoutBtnEl.textContent = 'Signing out…';
+      switchBtnEl.textContent = 'Switching…';
+
+      try {
+        for (const { url, method } of candidates) {
+          try {
+            const r = await fetch(url, { method, credentials: 'include' });
+            if (r.ok) break;
+          } catch { /* keep trying */ }
+        }
+      } finally {
+        logoutBtnEl.disabled = false;
+        switchBtnEl.disabled = false;
+        logoutBtnEl.textContent = originalLogout;
+        switchBtnEl.textContent = originalSwitch;
+        if (refresh) await refreshAuthUI();
+      }
+    }
+
+    async function switchAccount() {
+      // 1) Sign out locally (clears your app session)
+      await signOut({ refresh: false });
+
+      // 2) Redirect to login with hints to force the account chooser.
+      //    For Spotify, make sure your backend forwards `show_dialog=true`
+      //    to accounts.spotify.com/authorize.
+      const url = makeLoginUrl({
+        show_dialog: 'true', // Spotify-specific to show the account dialog
+        prompt: 'login',     // OIDC hint; harmless if ignored
+        switch: '1'          // your server can use this flag if needed
+      });
+      location.href = url;
+    }
+
+    logoutBtnEl.addEventListener('click', () => signOut());
+    switchBtnEl.addEventListener('click', switchAccount);
+
+    refreshAuthUI();
+  </script>
+
+  <!-- ONE form (mode toggle + single select OR checkbox mode) -->
+  <form id="f" class="stack">
+    <fieldset>
+      <legend>Selection mode</legend>
+      <label><input type="radio" name="mode" value="single" id="mode-single" checked> Single</label>
+      <label><input type="radio" name="mode" value="multi"  id="mode-multi"> Multiple (checkboxes)</label>
+      <small class="hint">No Ctrl/Cmd needed in Multiple mode.</small>
+    </fieldset>
+
+    <label for="mood-filter">Filter moods</label>
+    <input id="mood-filter" type="search" placeholder="Type to filter… e.g., chill, focus, latin" />
+
+    <div class="row" id="pickers">
+      <!-- Single-select -->
+      <div class="stack" id="single-wrap">
+        <label for="mood-single">Mood (single)</label>
+        <select id="mood-single" name="mood" size="12">
+          <!-- Placeholder -->
+          <option value="" disabled selected hidden>— choose a mood —</option>
+
+          <!-- Energy & Tempo -->
+          <optgroup label="Energy &amp; Tempo">
+            <option value="hype">hype</option>
+            <option value="high-energy">high-energy</option>
+            <option value="pumped-up">pumped up</option>
+            <option value="adrenaline-rush">adrenaline rush</option>
+            <option value="party-starter">party starter</option>
+            <option value="upbeat">upbeat</option>
+            <option value="groovy">groovy</option>
+            <option value="bouncy">bouncy</option>
+            <option value="laid-back">laid-back</option>
+            <option value="chill">chill</option>
+            <option value="mellow">mellow</option>
+            <option value="slow-burn">slow burn</option>
+            <option value="sleepy">sleepy</option>
+            <option value="lullaby">lullaby</option>
+          </optgroup>
+
+          <optgroup label="Emotions">
+            <option value="happy">happy</option>
+            <option value="ecstatic">ecstatic</option>
+            <option value="euphoric">euphoric</option>
+            <option value="confident">confident</option>
+            <option value="empowered">empowered</option>
+            <option value="romantic">romantic</option>
+            <option value="flirty">flirty</option>
+            <option value="lovestruck">lovestruck</option>
+            <option value="heartbroken">heartbroken</option>
+            <option value="melancholy">melancholy</option>
+            <option value="bittersweet">bittersweet</option>
+            <option value="nostalgic">nostalgic</option>
+            <option value="reflective">reflective</option>
+            <option value="hopeful">hopeful</option>
+            <option value="uplifting">uplifting</option>
+            <option value="serene">serene</option>
+            <option value="peaceful">peaceful</option>
+            <option value="comforting">comforting</option>
+            <option value="moody">moody</option>
+            <option value="brooding">brooding</option>
+            <option value="angsty">angsty</option>
+            <option value="cathartic">cathartic</option>
+          </optgroup>
+
+          <optgroup label="Focus &amp; Flow">
+            <option value="deep-focus">deep focus</option>
+            <option value="study-mode">study mode</option>
+            <option value="flow-state">flow state</option>
+            <option value="coding-fuel">coding fuel</option>
+            <option value="reading-nook">reading nook</option>
+            <option value="brain-food">brain food</option>
+            <option value="background-vibes">background vibes</option>
+          </optgroup>
+
+          <optgroup label="Night &amp; Day">
+            <option value="morning-sunshine">morning sunshine</option>
+            <option value="coffeehouse">coffeehouse</option>
+            <option value="golden-hour">golden hour</option>
+            <option value="sunset-cruise">sunset cruise</option>
+            <option value="midnight-drive">midnight drive</option>
+            <option value="after-hours">after hours</option>
+            <option value="3am-thoughts">3am thoughts</option>
+            <option value="late-night-lofi">late-night lo-fi</option>
+          </optgroup>
+
+          <optgroup label="Weather &amp; Seasons">
+            <option value="sunny-day">sunny day</option>
+            <option value="spring-bloom">spring bloom</option>
+            <option value="summer-heat">summer heat</option>
+            <option value="poolside">poolside</option>
+            <option value="beach-breeze">beach breeze</option>
+            <option value="rainy-day">rainy day</option>
+            <option value="thunderstorm">thunderstorm</option>
+            <option value="cozy-autumn">cozy autumn</option>
+            <option value="winter-chill">winter chill</option>
+            <option value="snow-day">snow day</option>
+            <option value="fireplace-glow">fireplace glow</option>
+          </optgroup>
+
+          <optgroup label="Movement &amp; Fitness">
+            <option value="gym-grind">gym grind</option>
+            <option value="cardio-boost">cardio boost</option>
+            <option value="hiit-hits">hiit hits</option>
+            <option value="running-rhythm">running rhythm</option>
+            <option value="dance-party">dance party</option>
+            <option value="yoga-flow">yoga flow</option>
+            <option value="stretch-and-breathe">stretch &amp; breathe</option>
+          </optgroup>
+
+          <optgroup label="Social &amp; Setting">
+            <option value="dinner-party">dinner party</option>
+            <option value="wine-and-dine">wine &amp; dine</option>
+            <option value="candlelit">candlelit</option>
+            <option value="study-group">study group</option>
+            <option value="road-trip">road trip</option>
+            <option value="city-lights">city lights</option>
+            <option value="rooftop">rooftop</option>
+            <option value="house-party">house party</option>
+            <option value="picnic-park">picnic park</option>
+            <option value="solo-time">solo time</option>
+            <option value="spa-day">spa day</option>
+          </optgroup>
+
+          <optgroup label="Aesthetic &amp; Style">
+            <option value="lofi-chillhop">lo-fi chillhop</option>
+            <option value="dream-pop">dream pop</option>
+            <option value="indie-daydream">indie daydream</option>
+            <option value="bedroom-pop">bedroom pop</option>
+            <option value="vaporwave-drift">vaporwave drift</option>
+            <option value="synthwave-night">synthwave night</option>
+            <option value="darkwave">darkwave</option>
+            <option value="neo-soul-smooth">neo-soul smooth</option>
+            <option value="jazz-lounge">jazz lounge</option>
+            <option value="bossa-breeze">bossa breeze</option>
+            <option value="acoustic-campfire">acoustic campfire</option>
+            <option value="folk-morning">folk morning</option>
+            <option value="bluesy-mood">bluesy mood</option>
+            <option value="cinematic-scope">cinematic scope</option>
+            <option value="minimal-ambient">minimal ambient</option>
+            <option value="piano-moods">piano moods</option>
+            <option value="string-quartet-calm">string quartet calm</option>
+          </optgroup>
+
+          <optgroup label="Edge &amp; Attitude">
+            <option value="bad-b-energy">bad b*** energy</option>
+            <option value="boss-mode">boss mode</option>
+            <option value="swagger">swagger</option>
+            <option value="sassy">sassy</option>
+            <option value="spicy">spicy</option>
+            <option value="rebel">rebel</option>
+            <option value="gritty">gritty</option>
+            <option value="dark-and-stormy">dark &amp; stormy</option>
+            <option value="mystique">mystique</option>
+          </optgroup>
+
+          <optgroup label="Cultural &amp; Global Vibes">
+            <option value="latin-heat">latin heat</option>
+            <option value="afrobeats-sunshine">afrobeats sunshine</option>
+            <option value="reggaeton-party">reggaeton party</option>
+            <option value="k-pop-spark">k-pop spark</option>
+            <option value="french-cafe">french café</option>
+            <option value="mediterranean-breeze">mediterranean breeze</option>
+            <option value="bollywood-glow">bollywood glow</option>
+            <option value="brazilian-groove">brazilian groove</option>
+            <option value="caribbean-chill">caribbean chill</option>
+          </optgroup>
+
+          <optgroup label="Special Moments">
+            <option value="getting-ready">getting ready</option>
+            <option value="pre-game">pre-game</option>
+            <option value="celebration">celebration</option>
+            <option value="birthday-vibes">birthday vibes</option>
+            <option value="engagement-feels">engagement feels</option>
+            <option value="wedding-slow-dance">wedding slow dance</option>
+            <option value="study-break">study break</option>
+            <option value="sunday-reset">sunday reset</option>
+            <option value="clean-and-declutter">clean &amp; declutter</option>
+            <option value="cozy-gaming">cozy gaming</option>
+          </optgroup>
+        </select>
+      </div>
+
+      <!-- Checkbox Multiple (single-select look) -->
+      <div class="stack hidden" id="multi-wrap">
+        <div class="actions" style="margin-top:.5rem">
+          <button type="button" id="select-all-visible">Select all visible</button>
+          <button type="button" id="clear-multi">Clear all</button>
+        </div>
+        <div id="cb-container" class="selectlike" aria-live="polite"></div>
+        <small id="multi-hint" class="hint">Checkboxes—no Ctrl/Cmd. Click tags to remove.</small>
+        <div class="tags" id="mood-multi-tags"></div>
+      </div>
+    </div>
+
+    <label for="genre">Genre (optional)</label>
+    <input id="genre" name="genre" placeholder="e.g. house" />
+
+    <label for="limit">Count</label>
+    <input id="limit" name="limit" type="number" value="20" min="5" max="100" />
+
+    <p class="actions">
+      <button type="submit">Generate Playlist</button>
+      <button type="button" id="reset-filter">Reset filter</button>
+    </p>
+  </form>
+
+  <div id="out"></div>
+
+  <script>
+    // --- filtering ---
+    function filterSelect(selectEl, q) {
+      const needle = q.trim().toLowerCase();
+      selectEl.querySelectorAll('option').forEach(opt => {
+        if (opt.disabled && opt.value === '') { opt.hidden = false; return; } // keep placeholder visible
+        const text = opt.textContent.toLowerCase();
+        opt.hidden = needle && !text.includes(needle);
+      });
+    }
+    function filterCheckboxes(container, q) {
+      const needle = q.trim().toLowerCase();
+      container.querySelectorAll('.cb-group').forEach(group => {
+        let anyVisible = false;
+        group.querySelectorAll('.cb-item').forEach(item => {
+          const text = item.dataset.label;
+          const visible = !needle || text.includes(needle);
+          item.classList.toggle('hidden', !visible);
+          if (visible) anyVisible = true;
+        });
+        group.classList.toggle('hidden', !anyVisible);
+      });
+    }
+
+    // DOM refs
+    const form = document.getElementById('f');
+    const out = document.getElementById('out');
+    const filter = document.getElementById('mood-filter');
+
+    const singleWrap = document.getElementById('single-wrap');
+    const singleSel  = document.getElementById('mood-single');
+
+    const multiWrap  = document.getElementById('multi-wrap');
+    const cbContainer = document.getElementById('cb-container');
+    const tagsWrap = document.getElementById('mood-multi-tags');
+
+    const modeSingle = document.getElementById('mode-single');
+    const modeMulti  = document.getElementById('mode-multi');
+
+    // Build checkbox UI from the single-select's optgroups/options
+    function buildCheckboxesFromSelect(selectEl) {
+      cbContainer.innerHTML = '';
+      selectEl.querySelectorAll('optgroup').forEach(og => {
+        const fs = document.createElement('fieldset');
+        fs.className = 'cb-group';
+        const legend = document.createElement('legend');
+        legend.textContent = og.label;
+        fs.appendChild(legend);
+
+        const ul = document.createElement('ul');
+        ul.className = 'cb-list';
+
+        [...og.querySelectorAll('option')].forEach(opt => {
+          if (opt.disabled && opt.value === '') return; // skip placeholder
+          const val = opt.value, text = opt.textContent;
+
+          const li = document.createElement('li');
+          li.className = 'cb-item';
+          li.dataset.value = val;
+          li.dataset.label = text.toLowerCase();
+
+          const label = document.createElement('label');
+          label.className = 'cb-label';
+
+          const id = 'cb-' + val;
+          const input = document.createElement('input');
+          input.type = 'checkbox';
+          input.name = 'mood';
+          input.value = val;
+          input.id = id;
+          input.disabled = true; // enabled only in multi mode
+          input.addEventListener('change', () => {
+            label.classList.toggle('is-checked', input.checked);
+            renderTags();
+          });
+
+          const txt = document.createElement('span');
+          txt.className = 'txt';
+          txt.textContent = text;
+
+          label.setAttribute('for', id);
+          label.appendChild(input);
+          label.appendChild(txt);
+
+          li.appendChild(label);
+          ul.appendChild(li);
+        });
+
+        fs.appendChild(ul);
+        cbContainer.appendChild(fs);
+      });
+    }
+    buildCheckboxesFromSelect(singleSel);
+
+    function cbInputs() { return cbContainer.querySelectorAll('input[type="checkbox"][name="mood"]'); }
+    function setCheckboxesDisabled(disabled) { cbInputs().forEach(cb => cb.disabled = disabled); }
+    function syncRowStates() {
+      cbInputs().forEach(cb => {
+        cb.closest('.cb-item').querySelector('.cb-label')
+          .classList.toggle('is-checked', cb.checked);
+      });
+    }
+
+    // Tags from checked boxes (neutral)
+    function renderTags() {
+      tagsWrap.innerHTML = '';
+      const checked = [...cbInputs()].filter(cb => cb.checked);
+      checked.forEach(cb => {
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        const labelText = cb.closest('.cb-item').querySelector('.txt').textContent;
+        tag.innerHTML = `<span>${labelText}</span><button aria-label="Remove ${labelText}">&times;</button>`;
+        tag.querySelector('button').addEventListener('click', () => {
+          cb.checked = false;
+          syncRowStates();
+          renderTags();
+        });
+        tagsWrap.appendChild(tag);
+      });
+    }
+
+    // Mode toggle
+    function setMode(mode) {
+      const isMulti = mode === 'multi';
+      singleWrap.classList.toggle('hidden', isMulti);
+      multiWrap.classList.toggle('hidden', !isMulti);
+
+      // Enable only active control so FormData submits a single field name "mood"
+      singleSel.disabled = isMulti;
+      setCheckboxesDisabled(!isMulti);
+
+      // Keep filter applied
+      if (isMulti) filterCheckboxes(cbContainer, filter.value);
+      else filterSelect(singleSel, filter.value);
+    }
+    modeSingle.addEventListener('change', () => setMode('single'));
+    modeMulti .addEventListener('change', () => setMode('multi'));
+
+    // init UI
+    setMode('single');
+
+    // Filtering
+    filter.addEventListener('input', () => {
+      if (modeMulti.checked) filterCheckboxes(cbContainer, filter.value);
+      else filterSelect(singleSel, filter.value);
+    });
+    document.getElementById('reset-filter').addEventListener('click', () => {
+      filter.value = '';
+      if (modeMulti.checked) filterCheckboxes(cbContainer, '');
+      else filterSelect(singleSel, '');
+    });
+
+    // Select all visible (checkbox mode)
+    document.getElementById('select-all-visible').addEventListener('click', () => {
+      cbContainer.querySelectorAll('.cb-item:not(.hidden) input[type="checkbox"][name="mood"]').forEach(cb => {
+        if (!cb.disabled) cb.checked = true;
+      });
+      syncRowStates();
+      renderTags();
+    });
+
+    // Clear all (checkbox mode)
+    document.getElementById('clear-multi').addEventListener('click', () => {
+      cbInputs().forEach(cb => cb.checked = false);
+      syncRowStates();
+      renderTags();
+    });
+
+    // Submit handler (API unchanged)
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      out.textContent = 'Creating...';
+
+      // Ensure only active control contributes values
+      singleSel.disabled = modeMulti.checked;
+      setCheckboxesDisabled(!modeMulti.checked);
+
+      const fd = new FormData(form);
+      try {
+        const res = await fetch('/api/playlist', {
+          method: 'POST',
+          body: fd,
+          credentials: 'include'
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || JSON.stringify(data));
+        out.innerHTML = `
+          <p>Added <b>${data.added}</b> tracks.</p>
+          <p>Playlist: <a href="${data.playlist_url}" target="_blank" rel="noopener">open on Spotify</a></p>
+          <p>Sample:</p>
+          <ul>${(data.sample_titles || []).map(t => `<li>${t}</li>`).join('')}</ul>
+          <p>Seeds: <code>${(JSON.stringify(data.used_seeds || {}))}</code></p>
+        `;
+      } catch (err) {
+        out.innerHTML = `<p style="color:#b00">Error: ${err.message}</p>`;
+      } finally {
+        // Re-enable both for UX
+        singleSel.disabled = false;
+        setCheckboxesDisabled(false);
+      }
+    });
+  </script>
+</body>
+</html>
