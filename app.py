@@ -3,13 +3,13 @@ from __future__ import annotations
 import os, json, time, secrets, urllib.parse, random
 from typing import Dict
 from urllib.parse import urlencode
+from pathlib import Path
 
 import requests
 from fastapi import FastAPI, Request, Query, HTTPException, status
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import URLSafeSerializer, BadSignature
-from pathlib import Path
 from dotenv import load_dotenv, find_dotenv
 
 # -----------------------------
@@ -23,10 +23,14 @@ REDIRECT_URI = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8001/callback
 SCOPES = "playlist-modify-private playlist-modify-public user-read-email"
 APP_SECRET = os.getenv("APP_SECRET", "change-me")
 
-if not CLIENT_ID:
-    raise RuntimeError("SPOTIFY_CLIENT_ID is missing in .env")
-if not CLIENT_SECRET:
-    raise RuntimeError("SPOTIFY_CLIENT_SECRET is missing in .env")
+# Optional development mock mode (bypass real Spotify calls)
+MOCK_MODE = os.getenv("MOCK_MODE", "").lower() in ("1", "true", "yes")
+
+if not MOCK_MODE:
+    if not CLIENT_ID:
+        raise RuntimeError("SPOTIFY_CLIENT_ID is missing in .env")
+    if not CLIENT_SECRET:
+        raise RuntimeError("SPOTIFY_CLIENT_SECRET is missing in .env")
 
 AUTH_URL = "https://accounts.spotify.com/authorize"
 TOKEN_URL = "https://accounts.spotify.com/api/token"
@@ -43,25 +47,22 @@ DEFAULT_GENRES = [
 # -----------------------------
 app = FastAPI(title="MoodPlaylists")
 
-# Resolve the /static folder relative to this file and don't error if it's missing.
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-app.mount(
-    "/static",
-    StaticFiles(directory=str(STATIC_DIR), check_dir=False),
-    name="static",
-)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR), check_dir=False), name="static")
 
 signer = URLSafeSerializer(APP_SECRET, salt="session")
+
+
 def _now() -> int:
-    import time
     return int(time.time())
+
 
 # -----------------------------
 # TOKENS STORE (simple local file)
 # -----------------------------
-# Save tokens.json next to this file (stable regardless of cwd)
 TOKENS_PATH = str(BASE_DIR / "tokens.json")
+
 
 def _load_tokens() -> Dict[str, dict]:
     if not os.path.exists(TOKENS_PATH):
@@ -72,9 +73,12 @@ def _load_tokens() -> Dict[str, dict]:
     except Exception:
         return {}
 
+
 def _save_tokens(store: Dict[str, dict]) -> None:
     with open(TOKENS_PATH, "w", encoding="utf-8") as f:
         json.dump(store, f, ensure_ascii=False, indent=2)
+
+
 # -----------------------------
 # COOKIE HELPER
 # -----------------------------
@@ -85,14 +89,33 @@ def get_user_id_from_cookie(request: Request) -> str:
     try:
         return signer.loads(user_cookie)
     except Exception:
-        raise HTTPException(
-            status_code=401, detail="Invalid session. Please login again."
-        )
+        raise HTTPException(status_code=401, detail="Invalid session. Please login again.")
 
 
 # -----------------------------
-# SPOTIFY HTTP HELPERS
+# SPOTIFY HTTP + CACHE HELPERS
 # -----------------------------
+CACHE_DIR = os.path.join(os.getcwd(), ".cache")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+
+def _cache_read(name: str):
+    p = os.path.join(CACHE_DIR, name)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def _cache_write(name: str, payload: dict):
+    p = os.path.join(CACHE_DIR, name)
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
 def _api_get(access_token: str, path: str, params: dict | None = None):
     r = requests.get(
         API_BASE + path,
@@ -357,10 +380,7 @@ def _fallback_from_genre_playlist(
 
 
 def _direct_search_by_genre(access_token: str, q: str, preset: dict, limit: int) -> list[dict]:
-    """
-    Search tracks by a keyword, filter by audio features to match the mood preset,
-    and be forgiving (market fallbacks + lenient popularity threshold).
-    """
+    """Search tracks by a keyword with mood filtering + market fallbacks."""
     def _search_tracks(market: str | None) -> list[dict]:
         params = {"q": q, "type": "track", "limit": 50}
         if market is not None:
@@ -371,7 +391,6 @@ def _direct_search_by_genre(access_token: str, q: str, preset: dict, limit: int)
         except Exception:
             return []
 
-    # try several markets
     items = (
         _search_tracks("from_token")
         or _search_tracks("PT")
@@ -381,11 +400,9 @@ def _direct_search_by_genre(access_token: str, q: str, preset: dict, limit: int)
     if not items:
         return []
 
-    # Deduplicate by id
     by_id = {t.get("id"): t for t in items if t and t.get("id")}
-    ids = [tid for tid in by_id.keys()]
+    ids = list(by_id.keys())
 
-    # Pull audio features; if it fails, proceed without filtering
     try:
         feats = _get_audio_features(access_token, ids)
     except Exception:
@@ -397,7 +414,6 @@ def _direct_search_by_genre(access_token: str, q: str, preset: dict, limit: int)
         if not t:
             continue
         f = feats.get(tid)
-        # Very light popularity guard
         if t.get("popularity", 0) < 10:
             continue
         if not f or _within_preset(f, preset):
@@ -416,42 +432,28 @@ def build_recommendations(
     preset = MOOD_PRESETS.get(mood, MOOD_PRESETS["happy"])
     limit = max(1, min(int(limit or 20), 100))
 
-    # --- short-circuit: skip Spotify /recommendations entirely if disabled ---
     if DISABLE_RECS:
         tt = _fallback_from_top_tracks(access_token, preset, limit)
         if tt:
-            return {
-                "tracks": tt[:limit],
-                "seeds": {"artists": [], "tracks": ["from_top_tracks"], "genres": []},
-            }
+            return {"tracks": tt[:limit], "seeds": {"artists": [], "tracks": ["from_top_tracks"], "genres": []}}
 
         g = (genre or random.choice(DEFAULT_GENRES))
         gp = _fallback_from_genre_playlist(access_token, g, preset, limit)
         if gp:
-            return {
-                "tracks": gp[:limit],
-                "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [g]},
-            }
+            return {"tracks": gp[:limit], "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [g]}}
 
         gp = _fallback_from_genre_playlist(access_token, (genre or "pop"), {}, limit)
         if gp:
-            return {
-                "tracks": gp[:limit],
-                "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [genre or "pop"]},
-            }
+            return {"tracks": gp[:limit], "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [genre or "pop"]}}
 
-        # final fallback when NO_RECS is on
         keyword = genre or random.choice(DEFAULT_GENRES)
         direct = _direct_search_by_genre(access_token, keyword, preset, limit)
         if direct:
-            return {
-                "tracks": direct,
-                "seeds": {"artists": [], "tracks": [], "genres": [genre or "keyword_search"]},
-            }
+            return {"tracks": direct, "seeds": {"artists": [], "tracks": [], "genres": [genre or "keyword_search"]}}
 
         return {"tracks": [], "seeds": {"artists": [], "tracks": [], "genres": []}}
 
-    # --- attempt 1: use seeds from user's top artists/tracks (+ optional genre) ---
+    # attempt 1: use seeds from user's top artists/tracks (+ optional genre)
     seeds_artists: list[str] = []
     seeds_tracks: list[str] = []
     if not genre:
@@ -467,7 +469,7 @@ def build_recommendations(
 
     params: dict = {"limit": limit, "market": "from_token", **preset}
 
-    # Spotify allows at most 5 total seeds across artists/tracks/genres
+    # max 5 seeds across artists/tracks/genres
     while len(seeds_artists) + len(seeds_tracks) + len(seed_genres) > 5:
         if seeds_tracks:
             seeds_tracks.pop()
@@ -485,7 +487,6 @@ def build_recommendations(
     if not any([seeds_artists, seeds_tracks, seed_genres]):
         params["seed_genres"] = "pop"
 
-    # Main attempt with market fallback
     tracks = _recs_with_market_fallback(access_token, params)
     if tracks:
         return {
@@ -497,7 +498,7 @@ def build_recommendations(
             },
         }
 
-    # --- attempt 2: genre-only ---
+    # attempt 2: genre-only
     try:
         picked = [genre.lower()] if genre else random.sample(DEFAULT_GENRES, k=min(3, len(DEFAULT_GENRES)))
         fallback_params = {"limit": limit, "seed_genres": ",".join(picked)}
@@ -507,33 +508,78 @@ def build_recommendations(
     except Exception:
         pass
 
-    # --- attempt 3: filter user's top tracks by audio features ---
     tt = _fallback_from_top_tracks(access_token, preset, limit)
     if tt:
         return {"tracks": tt[:limit], "seeds": {"artists": [], "tracks": ["from_top_tracks"], "genres": []}}
 
-    # --- attempt 4: filter tracks from a genre playlist ---
     g = genre or random.choice(DEFAULT_GENRES)
     gp = _fallback_from_genre_playlist(access_token, g, preset, limit)
     if gp:
         return {"tracks": gp[:limit], "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [g]}}
 
-    # --- attempt 5: plain 'pop' with no mood filters ---
     plain_tracks = _recs_with_market_fallback(access_token, {"limit": limit, "seed_genres": "pop"})
     if plain_tracks:
         return {"tracks": plain_tracks, "seeds": {"artists": [], "tracks": [], "genres": ["pop"]}}
 
-    # --- attempt 6: direct keyword search with mood filtering ---
     keyword = genre or random.choice(DEFAULT_GENRES)
     direct = _direct_search_by_genre(access_token, keyword, preset, limit)
     if direct:
-        return {
-            "tracks": direct,
-            "seeds": {"artists": [], "tracks": [], "genres": [genre or "keyword_search"]},
-        }
+        return {"tracks": direct, "seeds": {"artists": [], "tracks": [], "genres": [genre or "keyword_search"]}}
 
-    # --- last resort ---
     return {"tracks": [], "seeds": {"artists": [], "tracks": [], "genres": []}}
+
+
+# -----------------------------
+# DYNAMIC SPOTIFY DATA (genres / mood labels)
+# -----------------------------
+@app.get("/api/spotify/genre-seeds")
+def api_spotify_genre_seeds(request: Request, refresh: bool = False, ttl_seconds: int = 86400):
+    """Returns Spotify's /recommendations/available-genre-seeds (cached for 24h)."""
+    # Return cached or mock when available
+    if MOCK_MODE:
+        return {"fetched_at": _now(), "genres": ["pop", "rock", "dance", "electronic", "hip-hop", "indie"]}
+
+    if not refresh:
+        cached = _cache_read("genre_seeds.json")
+        if cached and (_now() - int(cached.get("fetched_at", 0))) < ttl_seconds:
+            return cached
+
+    user_id = get_user_id_from_cookie(request)
+    tok = _ensure_token(user_id)
+    raw = _api_get(tok, "/recommendations/available-genre-seeds")
+    seeds = (raw or {}).get("genres", [])
+    payload = {"fetched_at": _now(), "genres": seeds}
+    _cache_write("genre_seeds.json", payload)
+    return payload
+
+
+@app.get("/api/spotify/mood-labels")
+def api_spotify_mood_labels(request: Request, country: str = "US", limit: int = 50):
+    """
+    Pull playlist names from Spotify's 'mood' browse category.
+    Useful as suggestions; not a formal taxonomy.
+    """
+    # In MOCK_MODE return a small curated list useful for UI testing
+    if MOCK_MODE:
+        return {"labels": ["chill", "happy", "focus", "workout", "melancholic"], "category_found": False, "country": country}
+
+    user_id = get_user_id_from_cookie(request)
+    tok = _ensure_token(user_id)
+
+    cats = _api_get(tok, "/browse/categories", {"country": country, "limit": 50})
+    items = ((cats.get("categories") or {}).get("items") or [])
+    mood = next((c for c in items if c.get("id") == "mood"), None)
+    if not mood:
+        return {"labels": [], "category_found": False}
+
+    pls = _api_get(tok, f"/browse/categories/{mood['id']}/playlists",
+                   {"country": country, "limit": max(1, min(limit, 50))})
+    names = sorted({
+        (p.get("name") or "").strip()
+        for p in ((pls.get("playlists") or {}).get("items") or [])
+        if p and p.get("name")
+    })
+    return {"labels": names, "category_found": True, "category_id": mood["id"], "country": country}
 
 
 # -----------------------------
@@ -562,12 +608,9 @@ def home():
 
 
 @app.get("/login")
-def login(request: Request,
-          switch: bool = Query(False),
-          show_dialog: bool = Query(False)):
+def login(request: Request, switch: bool = Query(False), show_dialog: bool = Query(False)):
     """
-    If switch=1, force the Spotify chooser.
-    Stores a signed 'state' cookie for CSRF protection.
+    If switch=1, force the Spotify chooser. Stores a signed 'state' cookie for CSRF.
     """
     if switch:
         show_dialog = True
@@ -591,7 +634,7 @@ def login(request: Request,
     resp = RedirectResponse(url, status_code=307)
     resp.set_cookie("state", signer.dumps(state), httponly=True, samesite="lax")
     if switch:
-        resp.delete_cookie("user")
+        resp.delete_cookie("user")  # so UI looks logged-out before switching
     return resp
 
 
@@ -626,29 +669,22 @@ def callback(request: Request, code: str | None = None, state: str | None = None
     try:
         tok = r.json()
     except Exception:
-        return JSONResponse(
-            {"stage": "auth_code_exchange", "parse_error": r.text[:300]},
-            status_code=502,
-        )
+        return JSONResponse({"stage": "auth_code_exchange", "parse_error": r.text[:300]}, status_code=502)
 
     access_token = tok.get("access_token")
     if not access_token:
-        return JSONResponse(
-            {"stage": "auth_code_exchange", "error": "missing_access_token", "raw": tok},
-            status_code=502,
-        )
+        return JSONResponse({"stage": "auth_code_exchange", "error": "missing_access_token", "raw": tok}, status_code=502)
     refresh_token_new = tok.get("refresh_token")  # may be None on re-consent
     expires_at = int(time.time()) + int(tok.get("expires_in", 3600))
 
-    # Identify user via helper (gives structured errors)
+    # Identify user
     try:
         me = _api_get(access_token, "/me")
     except HTTPException as e:
         return JSONResponse({"stage": "whoami", "error": e.detail}, status_code=502)
-
     user_id = me["id"]
 
-    # Persist tokens; preserve old refresh token if Spotify didn't send one
+    # Persist tokens (preserve old refresh token if none returned)
     store = _load_tokens()
     existing = store.get(user_id, {})
     store[user_id] = {
@@ -691,9 +727,36 @@ def api_me(request: Request):
 async def api_playlist(request: Request):
     try:
         form = await request.form()
-        mood = (form.get("mood") or "").strip().lower()
+        limit = max(1, min(int(form.get("limit") or 20), 100))
+
+        # Multi-select moods support
+        raw_moods = form.getlist("mood") if hasattr(form, "getlist") else []
+        if not raw_moods:
+            val = (form.get("mood") or "").strip()
+            if val:
+                raw_moods = [v.strip() for v in val.split(",") if v.strip()]
+
+        chosen = (raw_moods[0] or "").strip().lower() if raw_moods else ""
         genre = (form.get("genre") or "").strip().lower() or None
-        limit = int(form.get("limit") or 20)
+
+        if chosen in MOOD_PRESETS:
+            mood = chosen
+        else:
+            # Unknown label -> use it to steer genre/keyword; keep a safe preset
+            mood = "happy"
+            if not genre and chosen:
+                genre = chosen
+
+        # Mock-mode shortcut
+        if MOCK_MODE:
+            sample_titles = [f"{mood.title()} Song {i+1} — Artist" for i in range(min(5, limit))]
+            return JSONResponse({
+                "playlist_id": f"mock-{int(time.time())}",
+                "playlist_url": None,
+                "added": limit,
+                "used_seeds": {"artists": [], "tracks": [], "genres": [genre] if genre else []},
+                "sample_titles": sample_titles,
+            })
 
         user_id = get_user_id_from_cookie(request)
         tok = _ensure_token(user_id)
@@ -703,10 +766,7 @@ async def api_playlist(request: Request):
         uris = [t["uri"] for t in tracks if t.get("uri")]
 
         if not tracks:
-            raise HTTPException(
-                status_code=502,
-                detail="Spotify returned no recommendations. Try another mood/genre.",
-            )
+            raise HTTPException(status_code=502, detail="Spotify returned no recommendations. Try another mood/genre.")
 
         me = _api_get(tok, "/me")
         playlist = create_playlist_with_tracks(
@@ -726,8 +786,8 @@ async def api_playlist(request: Request):
             }
         )
 
-    except HTTPException as e:
-        raise e
+    except HTTPException:
+        raise
     except Exception as e:
         import traceback
         return JSONResponse(
@@ -750,9 +810,7 @@ def _debug_env():
 
 
 @app.get("/_debug_recs")
-def _debug_recs(
-    request: Request, mood: str = "happy", genre: str | None = None, limit: int = 20
-):
+def _debug_recs(request: Request, mood: str = "happy", genre: str | None = None, limit: int = 20):
     user_id = get_user_id_from_cookie(request)
     tok = _ensure_token(user_id)
     result = build_recommendations(tok, mood=mood, genre=genre, limit=limit)
@@ -764,11 +822,7 @@ def _debug_recs(
         }
         for t in result.get("tracks", [])[:5]
     ]
-    return {
-        "used_seeds": result.get("seeds"),
-        "sample": sample,
-        "count": len(result.get("tracks", [])),
-    }
+    return {"used_seeds": result.get("seeds"), "sample": sample, "count": len(result.get("tracks", []))}
 
 
 @app.get("/_probe_me")
@@ -796,11 +850,7 @@ def _probe_plain(request: Request, limit: int = 5):
         try:
             data = _api_get(tok, "/recommendations", params)
             tracks = data.get("tracks") or []
-            out[label] = {
-                "count": len(tracks),
-                "sample": [t.get("name") for t in tracks[:3]],
-                "params": params,
-            }
+            out[label] = {"count": len(tracks), "sample": [t.get("name") for t in tracks[:3]], "params": params}
         except HTTPException as e:
             out[label] = {"error": e.detail, "params": params}
 
@@ -850,14 +900,8 @@ def _probe_search(request: Request, q: str = "pop", limit: int = 3):
     out = {"query": q, "playlists_found": 0, "samples": []}
 
     try:
-        search = _api_get(tok, "/search", {
-            "q": q,
-            "type": "playlist",
-            "limit": limit,
-            "market": "from_token",
-        })
+        search = _api_get(tok, "/search", {"q": q, "type": "playlist", "limit": limit, "market": "from_token"})
     except HTTPException as e:
-        # Surface the exact API error so we can see what's happening
         return {"search_error": e.detail}
 
     playlists = (((search or {}).get("playlists") or {}).get("items") or [])
@@ -872,10 +916,7 @@ def _probe_search(request: Request, q: str = "pop", limit: int = 3):
             continue
 
         try:
-            tr_resp = _api_get(tok, f"/playlists/{pid}/tracks", {
-                "limit": 5,
-                "market": "from_token",
-            })
+            tr_resp = _api_get(tok, f"/playlists/{pid}/tracks", {"limit": 5, "market": "from_token"})
             items = tr_resp.get("items") or []
             tracks = [it.get("track") for it in items if isinstance(it, dict) and it.get("track")]
             out["samples"].append({
@@ -885,13 +926,11 @@ def _probe_search(request: Request, q: str = "pop", limit: int = 3):
                 "sample": [t.get("name") for t in tracks[:3] if isinstance(t, dict)],
             })
         except HTTPException as e:
-            out["samples"].append({
-                "playlist": name,
-                "pid": pid,
-                "error": e.detail,
-            })
+            out["samples"].append({"playlist": name, "pid": pid, "error": e.detail})
 
     return out
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="127.0.0.1", port=8001, reload=True)

@@ -77,58 +77,107 @@
   </div>
 
   <script>
-    // ---------- Auth header (GET /logout only; switch forces show_dialog) ----------
+  // Dynamic mood loader + auth helpers
+  async function loadDynamicMoods() {
+    // Populate the mood *tags* area (not the big checkbox list) so the UI can
+    // be exercised quickly in MOCK_MODE. Tags are clickable and will select
+    // matching checkboxes in the main list when clicked.
+    const tagsWrap = document.getElementById('mood-multi-tags');
+    if (!tagsWrap) return;
+
+    async function makeTagsFromList(list) {
+      tagsWrap.innerHTML = '';
+      for (const name of (list || []).slice(0, 40)) {
+        const labelText = (name || '').toString();
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.innerHTML = `<span>${labelText}</span><button aria-label="Select ${labelText}">&plus;</button>`;
+        tag.querySelector('button').addEventListener('click', () => {
+          const needle = labelText.trim().toLowerCase();
+          // select matching checkboxes by dataset.label or by exact value
+          document.querySelectorAll('.cb-item').forEach(item => {
+            const lab = (item.dataset.label || '').toString().toLowerCase();
+            const cb = item.querySelector('input[type="checkbox"][name="mood"]');
+            if (!cb) return;
+            if (lab.includes(needle) || (cb.value || '').toLowerCase() === needle) {
+              cb.checked = true;
+            }
+          });
+          // rely on existing functions that will update UI when selection changes
+          if (typeof syncRowStates === 'function') try { syncRowStates(); } catch (e) {}
+          if (typeof renderTags === 'function') try { renderTags(); } catch (e) {}
+        });
+        tagsWrap.appendChild(tag);
+      }
+    }
+
+    try {
+      const r = await fetch('/api/spotify/mood-labels?country=US');
+      const data = await r.json();
+      const labels = (data.labels || []).slice(0, 60);
+      if (labels.length) {
+        makeTagsFromList(labels);
+        return;
+      }
+    } catch (e) { console.warn('mood-labels failed', e); }
+
+    try {
+      const r = await fetch('/api/spotify/genre-seeds');
+      const data = await r.json();
+      const seeds = (data.genres || []).slice(0, 100);
+      if (seeds.length) {
+        makeTagsFromList(seeds);
+      }
+    } catch (e) { console.warn('genre-seeds failed', e); }
+  }
+
+  function makeLoginUrl(extra = {}) {
+    const url = new URL('/login', location.href);
+    Object.entries(extra).forEach(([k, v]) => url.searchParams.set(k, v));
+    return url.toString();
+  }
+
+  async function refreshAuthUI() {
     const whoamiEl    = document.getElementById('whoami');
     const loginLinkEl = document.getElementById('loginLink');
     const logoutBtnEl = document.getElementById('logoutBtn');
     const switchBtnEl = document.getElementById('switchBtn');
-
-    function makeLoginUrl(extra = {}) {
-      const url = new URL('/login', location.href);
-      Object.entries(extra).forEach(([k, v]) => url.searchParams.set(k, v));
-      return url.toString();
+    try {
+      const res = await fetch('/api/me', { credentials: 'include', cache: 'no-store' });
+      if (!res.ok) throw new Error();
+      const me = await res.json();
+      whoamiEl.textContent = `Logged in as ${me.display_name || me.id}`;
+      loginLinkEl.style.display = 'none';
+      logoutBtnEl.style.display = 'inline-block';
+      switchBtnEl.style.display = 'inline-block';
+    } catch {
+      whoamiEl.textContent = '';
+      loginLinkEl.style.display = 'inline';
+      logoutBtnEl.style.display = 'none';
+      switchBtnEl.style.display = 'none';
     }
+  }
 
-    async function refreshAuthUI() {
-      try {
-        const res = await fetch('/api/me', { credentials: 'include', cache: 'no-store' });
-        if (!res.ok) throw new Error();
-        const me = await res.json();
-        whoamiEl.textContent = `Logged in as ${me.display_name || me.id}`;
-        loginLinkEl.style.display = 'none';
-        logoutBtnEl.style.display = 'inline-block';
-        switchBtnEl.style.display = 'inline-block';
-      } catch {
-        whoamiEl.textContent = '';
-        loginLinkEl.style.display = 'inline';
-        logoutBtnEl.style.display = 'none';
-        switchBtnEl.style.display = 'none';
-      }
-    }
+  async function apiLogout() { try { await fetch('/logout', { method: 'GET', credentials: 'include', redirect: 'follow', cache: 'no-store' }); } catch {} }
 
-    async function apiLogout() {
-      try {
-        await fetch('/logout', { method: 'GET', credentials: 'include', redirect: 'follow', cache: 'no-store' });
-      } catch {}
-    }
+  async function signOut() {
+    const logoutBtnEl = document.getElementById('logoutBtn');
+    logoutBtnEl.disabled = true; const old = logoutBtnEl.textContent; logoutBtnEl.textContent = 'Signing out…';
+    try { await apiLogout(); await refreshAuthUI(); } finally { logoutBtnEl.disabled = false; logoutBtnEl.textContent = old; }
+  }
 
-    async function signOut() {
-      logoutBtnEl.disabled = true; const old = logoutBtnEl.textContent; logoutBtnEl.textContent = 'Signing out…';
-      try { await apiLogout(); await refreshAuthUI(); } finally { logoutBtnEl.disabled = false; logoutBtnEl.textContent = old; }
-    }
+  async function switchAccount() {
+    const switchBtnEl = document.getElementById('switchBtn');
+    switchBtnEl.disabled = true; const old = switchBtnEl.textContent; switchBtnEl.textContent = 'Switching…';
+    try { await apiLogout(); location.href = makeLoginUrl({ show_dialog: 'true', switch: '1' }); } finally { switchBtnEl.disabled = false; switchBtnEl.textContent = old; }
+  }
 
-    async function switchAccount() {
-      switchBtnEl.disabled = true; const old = switchBtnEl.textContent; switchBtnEl.textContent = 'Switching…';
-      try {
-        await apiLogout(); // clear app session
-        // Force Spotify consent screen; user can click "Not you?" to change accounts
-        location.href = makeLoginUrl({ show_dialog: 'true', switch: '1' });
-      } finally { switchBtnEl.disabled = false; switchBtnEl.textContent = old; }
-    }
-
-    logoutBtnEl.addEventListener('click', signOut);
-    switchBtnEl.addEventListener('click', switchAccount);
+  document.addEventListener('DOMContentLoaded', () => {
+    loadDynamicMoods();
     refreshAuthUI();
+    document.getElementById('logoutBtn').addEventListener('click', signOut);
+    document.getElementById('switchBtn').addEventListener('click', switchAccount);
+  });
   </script>
 
   <!-- ONE form: Multiple-choice moods only -->
