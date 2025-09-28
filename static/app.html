@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <!-- dev: bust caches so updated JS runs -->
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+
+  <meta charset="utf-8" />
+  <title>Mood Playlists</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 2rem; max-width: 900px; color:#111; }
+    h1 { margin-top: 0; }
+    label { display:block; margin:.5rem 0 .25rem; font-weight:600; }
+    input, button { padding:.5rem; font-size:1rem; }
+    .row { display:flex; gap:1rem; align-items:flex-start; flex-wrap:wrap; }
+    .stack { display:grid; gap:.5rem; }
+    .hidden { display:none !important; }
+    #out { margin-top:1rem; padding:1rem; border:1px solid #ddd; border-radius:8px; }
+    code { background:#f6f8fa; padding:.2rem .4rem; border-radius:4px; }
+    small.hint { color:#555; }
+    .actions { display:flex; gap:8px; flex-wrap:wrap; }
+    button { border-radius:8px; border:1px solid #ccc; background:#fafafa; cursor:pointer; }
+    button:hover { background:#f0f0f0; }
+
+    /* Tag pills (neutral) */
+    .tags { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+    .tag {
+      display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px;
+      border:1px solid #ddd; background:#f7f7f7;
+    }
+    .tag button { all:unset; cursor:pointer; font-weight:700; line-height:1; padding:0 4px; }
+
+    /* --- Listbox-style checkbox panel (looks like a select) --- */
+    .selectlike {
+      border:1px solid #c7c7c7;
+      border-radius:6px;
+      background:#fff;
+      max-height: 384px;   /* ~12 rows */
+      overflow:auto;
+      padding:0;
+    }
+    .cb-group { margin:0; border:0; padding:0; }
+    .cb-group + .cb-group { border-top:1px solid #eee; }
+    .cb-group > legend {
+      position: sticky; top: 0; z-index: 1;
+      background:#fff; color:#555; font-size:.9rem;
+      padding:6px 8px; margin:0; border-bottom:1px dashed #eee;
+    }
+    .cb-list { list-style:none; margin:0; padding:0; }
+    .cb-item { margin:0; }
+    .cb-item.hidden { display:none; }
+    .cb-group.hidden { display:none; }
+
+    .cb-label {
+      display:flex; align-items:center; gap:8px;
+      height:32px; padding:0 8px;
+      cursor:pointer; user-select:none;
+      background:transparent;
+    }
+    .cb-label input { margin:0; }
+    .cb-label:hover { background:#f3f4f6; }
+    .cb-label.is-checked { background:#e7f0ff; }
+    .cb-label:focus-within { outline:2px solid #8cb8ff; outline-offset:-2px; border-radius:4px; }
+  </style>
+</head>
+<body>
+  <h1>Mood Playlists</h1>
+
+  <!-- Auth UI -->
+  <div id="auth" style="margin-bottom:12px; display:flex; align-items:center; gap:.5rem;">
+    <a id="loginLink" href="/login">Login with Spotify</a>
+    <span id="whoami" style="color:#555;"></span>
+    <button id="switchBtn" type="button" style="display:none;">Switch account</button>
+    <button id="logoutBtn" type="button" style="display:none;">Sign out</button>
+  </div>
+
+  <script>
+    // ---------- Auth header (GET /logout only; switch forces show_dialog) ----------
+    const whoamiEl    = document.getElementById('whoami');
+    const loginLinkEl = document.getElementById('loginLink');
+    const logoutBtnEl = document.getElementById('logoutBtn');
+    const switchBtnEl = document.getElementById('switchBtn');
+
+    function makeLoginUrl(extra = {}) {
+      const url = new URL('/login', location.href);
+      Object.entries(extra).forEach(([k, v]) => url.searchParams.set(k, v));
+      return url.toString();
+    }
+
+    async function refreshAuthUI() {
+      try {
+        const res = await fetch('/api/me', { credentials: 'include', cache: 'no-store' });
+        if (!res.ok) throw new Error();
+        const me = await res.json();
+        whoamiEl.textContent = `Logged in as ${me.display_name || me.id}`;
+        loginLinkEl.style.display = 'none';
+        logoutBtnEl.style.display = 'inline-block';
+        switchBtnEl.style.display = 'inline-block';
+      } catch {
+        whoamiEl.textContent = '';
+        loginLinkEl.style.display = 'inline';
+        logoutBtnEl.style.display = 'none';
+        switchBtnEl.style.display = 'none';
+      }
+    }
+
+    async function apiLogout() {
+      try {
+        await fetch('/logout', { method: 'GET', credentials: 'include', redirect: 'follow', cache: 'no-store' });
+      } catch {}
+    }
+
+    async function signOut() {
+      logoutBtnEl.disabled = true; const old = logoutBtnEl.textContent; logoutBtnEl.textContent = 'Signing out…';
+      try { await apiLogout(); await refreshAuthUI(); } finally { logoutBtnEl.disabled = false; logoutBtnEl.textContent = old; }
+    }
+
+    async function switchAccount() {
+      switchBtnEl.disabled = true; const old = switchBtnEl.textContent; switchBtnEl.textContent = 'Switching…';
+      try {
+        await apiLogout(); // clear app session
+        // Force Spotify consent screen; user can click "Not you?" to change accounts
+        location.href = makeLoginUrl({ show_dialog: 'true', switch: '1' });
+      } finally { switchBtnEl.disabled = false; switchBtnEl.textContent = old; }
+    }
+
+    logoutBtnEl.addEventListener('click', signOut);
+    switchBtnEl.addEventListener('click', switchAccount);
+    refreshAuthUI();
+  </script>
+
+  <!-- ONE form: Multiple-choice moods only -->
+  <form id="f" class="stack">
+    <label for="mood-filter">Filter moods</label>
+    <input id="mood-filter" type="search" placeholder="Type to filter… e.g., chill, focus, latin" />
+
+    <div class="actions" style="margin:.25rem 0 .5rem">
+      <button type="button" id="select-all-visible">Select all visible</button>
+      <button type="button" id="clear-multi">Clear all</button>
+    </div>
+
+    <!-- Checkbox list -->
+    <div id="cb-container" class="selectlike" aria-live="polite">
+      <!-- Energy & Tempo -->
+      <fieldset class="cb-group"><legend>Energy &amp; Tempo</legend><ul class="cb-list">
+        <li class="cb-item" data-label="hype"><label class="cb-label" for="cb-hype"><input id="cb-hype" type="checkbox" name="mood" value="hype"><span class="txt">hype</span></label></li>
+        <li class="cb-item" data-label="high-energy"><label class="cb-label" for="cb-high-energy"><input id="cb-high-energy" type="checkbox" name="mood" value="high-energy"><span class="txt">high-energy</span></label></li>
+        <li class="cb-item" data-label="pumped up"><label class="cb-label" for="cb-pumped-up"><input id="cb-pumped-up" type="checkbox" name="mood" value="pumped-up"><span class="txt">pumped up</span></label></li>
+        <li class="cb-item" data-label="adrenaline rush"><label class="cb-label" for="cb-adrenaline-rush"><input id="cb-adrenaline-rush" type="checkbox" name="mood" value="adrenaline-rush"><span class="txt">adrenaline rush</span></label></li>
+        <li class="cb-item" data-label="party starter"><label class="cb-label" for="cb-party-starter"><input id="cb-party-starter" type="checkbox" name="mood" value="party-starter"><span class="txt">party starter</span></label></li>
+        <li class="cb-item" data-label="upbeat"><label class="cb-label" for="cb-upbeat"><input id="cb-upbeat" type="checkbox" name="mood" value="upbeat"><span class="txt">upbeat</span></label></li>
+        <li class="cb-item" data-label="groovy"><label class="cb-label" for="cb-groovy"><input id="cb-groovy" type="checkbox" name="mood" value="groovy"><span class="txt">groovy</span></label></li>
+        <li class="cb-item" data-label="bouncy"><label class="cb-label" for="cb-bouncy"><input id="cb-bouncy" type="checkbox" name="mood" value="bouncy"><span class="txt">bouncy</span></label></li>
+        <li class="cb-item" data-label="laid-back"><label class="cb-label" for="cb-laid-back"><input id="cb-laid-back" type="checkbox" name="mood" value="laid-back"><span class="txt">laid-back</span></label></li>
+        <li class="cb-item" data-label="chill"><label class="cb-label" for="cb-chill"><input id="cb-chill" type="checkbox" name="mood" value="chill"><span class="txt">chill</span></label></li>
+        <li class="cb-item" data-label="mellow"><label class="cb-label" for="cb-mellow"><input id="cb-mellow" type="checkbox" name="mood" value="mellow"><span class="txt">mellow</span></label></li>
+        <li class="cb-item" data-label="slow burn"><label class="cb-label" for="cb-slow-burn"><input id="cb-slow-burn" type="checkbox" name="mood" value="slow-burn"><span class="txt">slow burn</span></label></li>
+        <li class="cb-item" data-label="sleepy"><label class="cb-label" for="cb-sleepy"><input id="cb-sleepy" type="checkbox" name="mood" value="sleepy"><span class="txt">sleepy</span></label></li>
+        <li class="cb-item" data-label="lullaby"><label class="cb-label" for="cb-lullaby"><input id="cb-lullaby" type="checkbox" name="mood" value="lullaby"><span class="txt">lullaby</span></label></li>
+      </ul></fieldset>
+
+      <!-- Emotions -->
+      <fieldset class="cb-group"><legend>Emotions</legend><ul class="cb-list">
+        <li class="cb-item" data-label="happy"><label class="cb-label" for="cb-happy"><input id="cb-happy" type="checkbox" name="mood" value="happy"><span class="txt">happy</span></label></li>
+        <li class="cb-item" data-label="ecstatic"><label class="cb-label" for="cb-ecstatic"><input id="cb-ecstatic" type="checkbox" name="mood" value="ecstatic"><span class="txt">ecstatic</span></label></li>
+        <li class="cb-item" data-label="euphoric"><label class="cb-label" for="cb-euphoric"><input id="cb-euphoric" type="checkbox" name="mood" value="euphoric"><span class="txt">euphoric</span></label></li>
+        <li class="cb-item" data-label="confident"><label class="cb-label" for="cb-confident"><input id="cb-confident" type="checkbox" name="mood" value="confident"><span class="txt">confident</span></label></li>
+        <li class="cb-item" data-label="empowered"><label class="cb-label" for="cb-empowered"><input id="cb-empowered" type="checkbox" name="mood" value="empowered"><span class="txt">empowered</span></label></li>
+        <li class="cb-item" data-label="romantic"><label class="cb-label" for="cb-romantic"><input id="cb-romantic" type="checkbox" name="mood" value="romantic"><span class="txt">romantic</span></label></li>
+        <li class="cb-item" data-label="flirty"><label class="cb-label" for="cb-flirty"><input id="cb-flirty" type="checkbox" name="mood" value="flirty"><span class="txt">flirty</span></label></li>
+        <li class="cb-item" data-label="lovestruck"><label class="cb-label" for="cb-lovestruck"><input id="cb-lovestruck" type="checkbox" name="mood" value="lovestruck"><span class="txt">lovestruck</span></label></li>
+        <li class="cb-item" data-label="heartbroken"><label class="cb-label" for="cb-heartbroken"><input id="cb-heartbroken" type="checkbox" name="mood" value="heartbroken"><span class="txt">heartbroken</span></label></li>
+        <li class="cb-item" data-label="melancholy"><label class="cb-label" for="cb-melancholy"><input id="cb-melancholy" type="checkbox" name="mood" value="melancholy"><span class="txt">melancholy</span></label></li>
+        <li class="cb-item" data-label="bittersweet"><label class="cb-label" for="cb-bittersweet"><input id="cb-bittersweet" type="checkbox" name="mood" value="bittersweet"><span class="txt">bittersweet</span></label></li>
+        <li class="cb-item" data-label="nostalgic"><label class="cb-label" for="cb-nostalgic"><input id="cb-nostalgic" type="checkbox" name="mood" value="nostalgic"><span class="txt">nostalgic</span></label></li>
+        <li class="cb-item" data-label="reflective"><label class="cb-label" for="cb-reflective"><input id="cb-reflective" type="checkbox" name="mood" value="reflective"><span class="txt">reflective</span></label></li>
+        <li class="cb-item" data-label="hopeful"><label class="cb-label" for="cb-hopeful"><input id="cb-hopeful" type="checkbox" name="mood" value="hopeful"><span class="txt">hopeful</span></label></li>
+        <li class="cb-item" data-label="uplifting"><label class="cb-label" for="cb-uplifting"><input id="cb-uplifting" type="checkbox" name="mood" value="uplifting"><span class="txt">uplifting</span></label></li>
+        <li class="cb-item" data-label="serene"><label class="cb-label" for="cb-serene"><input id="cb-serene" type="checkbox" name="mood" value="serene"><span class="txt">serene</span></label></li>
+        <li class="cb-item" data-label="peaceful"><label class="cb-label" for="cb-peaceful"><input id="cb-peaceful" type="checkbox" name="mood" value="peaceful"><span class="txt">peaceful</span></label></li>
+        <li class="cb-item" data-label="comforting"><label class="cb-label" for="cb-comforting"><input id="cb-comforting" type="checkbox" name="mood" value="comforting"><span class="txt">comforting</span></label></li>
+        <li class="cb-item" data-label="moody"><label class="cb-label" for="cb-moody"><input id="cb-moody" type="checkbox" name="mood" value="moody"><span class="txt">moody</span></label></li>
+        <li class="cb-item" data-label="brooding"><label class="cb-label" for="cb-brooding"><input id="cb-brooding" type="checkbox" name="mood" value="brooding"><span class="txt">brooding</span></label></li>
+        <li class="cb-item" data-label="angsty"><label class="cb-label" for="cb-angsty"><input id="cb-angsty" type="checkbox" name="mood" value="angsty"><span class="txt">angsty</span></label></li>
+        <li class="cb-item" data-label="cathartic"><label class="cb-label" for="cb-cathartic"><input id="cb-cathartic" type="checkbox" name="mood" value="cathartic"><span class="txt">cathartic</span></label></li>
+      </ul></fieldset>
+
+      <!-- Focus & Flow -->
+      <fieldset class="cb-group"><legend>Focus &amp; Flow</legend><ul class="cb-list">
+        <li class="cb-item" data-label="deep focus"><label class="cb-label" for="cb-deep-focus"><input id="cb-deep-focus" type="checkbox" name="mood" value="deep-focus"><span class="txt">deep focus</span></label></li>
+        <li class="cb-item" data-label="study mode"><label class="cb-label" for="cb-study-mode"><input id="cb-study-mode" type="checkbox" name="mood" value="study-mode"><span class="txt">study mode</span></label></li>
+        <li class="cb-item" data-label="flow state"><label class="cb-label" for="cb-flow-state"><input id="cb-flow-state" type="checkbox" name="mood" value="flow-state"><span class="txt">flow state</span></label></li>
+        <li class="cb-item" data-label="coding fuel"><label class="cb-label" for="cb-coding-fuel"><input id="cb-coding-fuel" type="checkbox" name="mood" value="coding-fuel"><span class="txt">coding fuel</span></label></li>
+        <li class="cb-item" data-label="reading nook"><label class="cb-label" for="cb-reading-nook"><input id="cb-reading-nook" type="checkbox" name="mood" value="reading-nook"><span class="txt">reading nook</span></label></li>
+        <li class="cb-item" data-label="brain food"><label class="cb-label" for="cb-brain-food"><input id="cb-brain-food" type="checkbox" name="mood" value="brain-food"><span class="txt">brain food</span></label></li>
+        <li class="cb-item" data-label="background vibes"><label class="cb-label" for="cb-background-vibes"><input id="cb-background-vibes" type="checkbox" name="mood" value="background-vibes"><span class="txt">background vibes</span></label></li>
+      </ul></fieldset>
+
+      <!-- Night & Day -->
+      <fieldset class="cb-group"><legend>Night &amp; Day</legend><ul class="cb-list">
+        <li class="cb-item" data-label="morning sunshine"><label class="cb-label" for="cb-morning-sunshine"><input id="cb-morning-sunshine" type="checkbox" name="mood" value="morning-sunshine"><span class="txt">morning sunshine</span></label></li>
+        <li class="cb-item" data-label="coffeehouse"><label class="cb-label" for="cb-coffeehouse"><input id="cb-coffeehouse" type="checkbox" name="mood" value="coffeehouse"><span class="txt">coffeehouse</span></label></li>
+        <li class="cb-item" data-label="golden hour"><label class="cb-label" for="cb-golden-hour"><input id="cb-golden-hour" type="checkbox" name="mood" value="golden-hour"><span class="txt">golden hour</span></label></li>
+        <li class="cb-item" data-label="sunset cruise"><label class="cb-label" for="cb-sunset-cruise"><input id="cb-sunset-cruise" type="checkbox" name="mood" value="sunset-cruise"><span class="txt">sunset cruise</span></label></li>
+        <li class="cb-item" data-label="midnight drive"><label class="cb-label" for="cb-midnight-drive"><input id="cb-midnight-drive" type="checkbox" name="mood" value="midnight-drive"><span class="txt">midnight drive</span></label></li>
+        <li class="cb-item" data-label="after hours"><label class="cb-label" for="cb-after-hours"><input id="cb-after-hours" type="checkbox" name="mood" value="after-hours"><span class="txt">after hours</span></label></li>
+        <li class="cb-item" data-label="3am thoughts"><label class="cb-label" for="cb-3am-thoughts"><input id="cb-3am-thoughts" type="checkbox" name="mood" value="3am-thoughts"><span class="txt">3am thoughts</span></label></li>
+        <li class="cb-item" data-label="late-night lo-fi"><label class="cb-label" for="cb-late-night-lofi"><input id="cb-late-night-lofi" type="checkbox" name="mood" value="late-night-lofi"><span class="txt">late-night lo-fi</span></label></li>
+      </ul></fieldset>
+
+      <!-- Weather & Seasons -->
+      <fieldset class="cb-group"><legend>Weather &amp; Seasons</legend><ul class="cb-list">
+        <li class="cb-item" data-label="sunny day"><label class="cb-label" for="cb-sunny-day"><input id="cb-sunny-day" type="checkbox" name="mood" value="sunny-day"><span class="txt">sunny day</span></label></li>
+        <li class="cb-item" data-label="spring bloom"><label class="cb-label" for="cb-spring-bloom"><input id="cb-spring-bloom" type="checkbox" name="mood" value="spring-bloom"><span class="txt">spring bloom</span></label></li>
+        <li class="cb-item" data-label="summer heat"><label class="cb-label" for="cb-summer-heat"><input id="cb-summer-heat" type="checkbox" name="mood" value="summer-heat"><span class="txt">summer heat</span></label></li>
+        <li class="cb-item" data-label="poolside"><label class="cb-label" for="cb-poolside"><input id="cb-poolside" type="checkbox" name="mood" value="poolside"><span class="txt">poolside</span></label></li>
+        <li class="cb-item" data-label="beach breeze"><label class="cb-label" for="cb-beach-breeze"><input id="cb-beach-breeze" type="checkbox" name="mood" value="beach-breeze"><span class="txt">beach breeze</span></label></li>
+        <li class="cb-item" data-label="rainy day"><label class="cb-label" for="cb-rainy-day"><input id="cb-rainy-day" type="checkbox" name="mood" value="rainy-day"><span class="txt">rainy day</span></label></li>
+        <li class="cb-item" data-label="thunderstorm"><label class="cb-label" for="cb-thunderstorm"><input id="cb-thunderstorm" type="checkbox" name="mood" value="thunderstorm"><span class="txt">thunderstorm</span></label></li>
+        <li class="cb-item" data-label="cozy autumn"><label class="cb-label" for="cb-cozy-autumn"><input id="cb-cozy-autumn" type="checkbox" name="mood" value="cozy-autumn"><span class="txt">cozy autumn</span></label></li>
+        <li class="cb-item" data-label="winter chill"><label class="cb-label" for="cb-winter-chill"><input id="cb-winter-chill" type="checkbox" name="mood" value="winter-chill"><span class="txt">winter chill</span></label></li>
+        <li class="cb-item" data-label="snow day"><label class="cb-label" for="cb-snow-day"><input id="cb-snow-day" type="checkbox" name="mood" value="snow-day"><span class="txt">snow day</span></label></li>
+        <li class="cb-item" data-label="fireplace glow"><label class="cb-label" for="cb-fireplace-glow"><input id="cb-fireplace-glow" type="checkbox" name="mood" value="fireplace-glow"><span class="txt">fireplace glow</span></label></li>
+      </ul></fieldset>
+
+      <!-- Movement & Fitness -->
+      <fieldset class="cb-group"><legend>Movement &amp; Fitness</legend><ul class="cb-list">
+        <li class="cb-item" data-label="gym grind"><label class="cb-label" for="cb-gym-grind"><input id="cb-gym-grind" type="checkbox" name="mood" value="gym-grind"><span class="txt">gym grind</span></label></li>
+        <li class="cb-item" data-label="cardio boost"><label class="cb-label" for="cb-cardio-boost"><input id="cb-cardio-boost" type="checkbox" name="mood" value="cardio-boost"><span class="txt">cardio boost</span></label></li>
+        <li class="cb-item" data-label="hiit hits"><label class="cb-label" for="cb-hiit-hits"><input id="cb-hiit-hits" type="checkbox" name="mood" value="hiit-hits"><span class="txt">hiit hits</span></label></li>
+        <li class="cb-item" data-label="running rhythm"><label class="cb-label" for="cb-running-rhythm"><input id="cb-running-rhythm" type="checkbox" name="mood" value="running-rhythm"><span class="txt">running rhythm</span></label></li>
+        <li class="cb-item" data-label="dance party"><label class="cb-label" for="cb-dance-party"><input id="cb-dance-party" type="checkbox" name="mood" value="dance-party"><span class="txt">dance party</span></label></li>
+        <li class="cb-item" data-label="yoga flow"><label class="cb-label" for="cb-yoga-flow"><input id="cb-yoga-flow" type="checkbox" name="mood" value="yoga-flow"><span class="txt">yoga flow</span></label></li>
+        <li class="cb-item" data-label="stretch & breathe"><label class="cb-label" for="cb-stretch-and-breathe"><input id="cb-stretch-and-breathe" type="checkbox" name="mood" value="stretch-and-breathe"><span class="txt">stretch &amp; breathe</span></label></li>
+      </ul></fieldset>
+
+      <!-- Social & Setting -->
+      <fieldset class="cb-group"><legend>Social &amp; Setting</legend><ul class="cb-list">
+        <li class="cb-item" data-label="dinner party"><label class="cb-label" for="cb-dinner-party"><input id="cb-dinner-party" type="checkbox" name="mood" value="dinner-party"><span class="txt">dinner party</span></label></li>
+        <li class="cb-item" data-label="wine & dine"><label class="cb-label" for="cb-wine-and-dine"><input id="cb-wine-and-dine" type="checkbox" name="mood" value="wine-and-dine"><span class="txt">wine &amp; dine</span></label></li>
+        <li class="cb-item" data-label="candlelit"><label class="cb-label" for="cb-candlelit"><input id="cb-candlelit" type="checkbox" name="mood" value="candlelit"><span class="txt">candlelit</span></label></li>
+        <li class="cb-item" data-label="study group"><label class="cb-label" for="cb-study-group"><input id="cb-study-group" type="checkbox" name="mood" value="study-group"><span class="txt">study group</span></label></li>
+        <li class="cb-item" data-label="road trip"><label class="cb-label" for="cb-road-trip"><input id="cb-road-trip" type="checkbox" name="mood" value="road-trip"><span class="txt">road trip</span></label></li>
+        <li class="cb-item" data-label="city lights"><label class="cb-label" for="cb-city-lights"><input id="cb-city-lights" type="checkbox" name="mood" value="city-lights"><span class="txt">city lights</span></label></li>
+        <li class="cb-item" data-label="rooftop"><label class="cb-label" for="cb-rooftop"><input id="cb-rooftop" type="checkbox" name="mood" value="rooftop"><span class="txt">rooftop</span></label></li>
+        <li class="cb-item" data-label="house party"><label class="cb-label" for="cb-house-party"><input id="cb-house-party" type="checkbox" name="mood" value="house-party"><span class="txt">house party</span></label></li>
+        <li class="cb-item" data-label="picnic park"><label class="cb-label" for="cb-picnic-park"><input id="cb-picnic-park" type="checkbox" name="mood" value="picnic-park"><span class="txt">picnic park</span></label></li>
+        <li class="cb-item" data-label="solo time"><label class="cb-label" for="cb-solo-time"><input id="cb-solo-time" type="checkbox" name="mood" value="solo-time"><span class="txt">solo time</span></label></li>
+        <li class="cb-item" data-label="spa day"><label class="cb-label" for="cb-spa-day"><input id="cb-spa-day" type="checkbox" name="mood" value="spa-day"><span class="txt">spa day</span></label></li>
+      </ul></fieldset>
+
+      <!-- Aesthetic & Style -->
+      <fieldset class="cb-group"><legend>Aesthetic &amp; Style</legend><ul class="cb-list">
+        <li class="cb-item" data-label="lo-fi chillhop"><label class="cb-label" for="cb-lofi-chillhop"><input id="cb-lofi-chillhop" type="checkbox" name="mood" value="lofi-chillhop"><span class="txt">lo-fi chillhop</span></label></li>
+        <li class="cb-item" data-label="dream pop"><label class="cb-label" for="cb-dream-pop"><input id="cb-dream-pop" type="checkbox" name="mood" value="dream-pop"><span class="txt">dream pop</span></label></li>
+        <li class="cb-item" data-label="indie daydream"><label class="cb-label" for="cb-indie-daydream"><input id="cb-indie-daydream" type="checkbox" name="mood" value="indie-daydream"><span class="txt">indie daydream</span></label></li>
+        <li class="cb-item" data-label="bedroom pop"><label class="cb-label" for="cb-bedroom-pop"><input id="cb-bedroom-pop" type="checkbox" name="mood" value="bedroom-pop"><span class="txt">bedroom pop</span></label></li>
+        <li class="cb-item" data-label="vaporwave drift"><label class="cb-label" for="cb-vaporwave-drift"><input id="cb-vaporwave-drift" type="checkbox" name="mood" value="vaporwave-drift"><span class="txt">vaporwave drift</span></label></li>
+        <li class="cb-item" data-label="synthwave night"><label class="cb-label" for="cb-synthwave-night"><input id="cb-synthwave-night" type="checkbox" name="mood" value="synthwave-night"><span class="txt">synthwave night</span></label></li>
+        <li class="cb-item" data-label="darkwave"><label class="cb-label" for="cb-darkwave"><input id="cb-darkwave" type="checkbox" name="mood" value="darkwave"><span class="txt">darkwave</span></label></li>
+        <li class="cb-item" data-label="neo-soul smooth"><label class="cb-label" for="cb-neo-soul-smooth"><input id="cb-neo-soul-smooth" type="checkbox" name="mood" value="neo-soul-smooth"><span class="txt">neo-soul smooth</span></label></li>
+        <li class="cb-item" data-label="jazz lounge"><label class="cb-label" for="cb-jazz-lounge"><input id="cb-jazz-lounge" type="checkbox" name="mood" value="jazz-lounge"><span class="txt">jazz lounge</span></label></li>
+        <li class="cb-item" data-label="bossa breeze"><label class="cb-label" for="cb-bossa-breeze"><input id="cb-bossa-breeze" type="checkbox" name="mood" value="bossa-breeze"><span class="txt">bossa breeze</span></label></li>
+        <li class="cb-item" data-label="acoustic campfire"><label class="cb-label" for="cb-acoustic-campfire"><input id="cb-acoustic-campfire" type="checkbox" name="mood" value="acoustic-campfire"><span class="txt">acoustic campfire</span></label></li>
+        <li class="cb-item" data-label="folk morning"><label class="cb-label" for="cb-folk-morning"><input id="cb-folk-morning" type="checkbox" name="mood" value="folk-morning"><span class="txt">folk morning</span></label></li>
+        <li class="cb-item" data-label="bluesy mood"><label class="cb-label" for="cb-bluesy-mood"><input id="cb-bluesy-mood" type="checkbox" name="mood" value="bluesy-mood"><span class="txt">bluesy mood</span></label></li>
+        <li class="cb-item" data-label="cinematic scope"><label class="cb-label" for="cb-cinematic-scope"><input id="cb-cinematic-scope" type="checkbox" name="mood" value="cinematic-scope"><span class="txt">cinematic scope</span></label></li>
+        <li class="cb-item" data-label="minimal ambient"><label class="cb-label" for="cb-minimal-ambient"><input id="cb-minimal-ambient" type="checkbox" name="mood" value="minimal-ambient"><span class="txt">minimal ambient</span></label></li>
+        <li class="cb-item" data-label="piano moods"><label class="cb-label" for="cb-piano-moods"><input id="cb-piano-moods" type="checkbox" name="mood" value="piano-moods"><span class="txt">piano moods</span></label></li>
+        <li class="cb-item" data-label="string quartet calm"><label class="cb-label" for="cb-string-quartet-calm"><input id="cb-string-quartet-calm" type="checkbox" name="mood" value="string-quartet-calm"><span class="txt">string quartet calm</span></label></li>
+      </ul></fieldset>
+
+      <!-- Edge & Attitude -->
+      <fieldset class="cb-group"><legend>Edge &amp; Attitude</legend><ul class="cb-list">
+        <li class="cb-item" data-label="bad b*** energy"><label class="cb-label" for="cb-bad-b-energy"><input id="cb-bad-b-energy" type="checkbox" name="mood" value="bad-b-energy"><span class="txt">bad b*** energy</span></label></li>
+        <li class="cb-item" data-label="boss mode"><label class="cb-label" for="cb-boss-mode"><input id="cb-boss-mode" type="checkbox" name="mood" value="boss-mode"><span class="txt">boss mode</span></label></li>
+        <li class="cb-item" data-label="swagger"><label class="cb-label" for="cb-swagger"><input id="cb-swagger" type="checkbox" name="mood" value="swagger"><span class="txt">swagger</span></label></li>
+        <li class="cb-item" data-label="sassy"><label class="cb-label" for="cb-sassy"><input id="cb-sassy" type="checkbox" name="mood" value="sassy"><span class="txt">sassy</span></label></li>
+        <li class="cb-item" data-label="spicy"><label class="cb-label" for="cb-spicy"><input id="cb-spicy" type="checkbox" name="mood" value="spicy"><span class="txt">spicy</span></label></li>
+        <li class="cb-item" data-label="rebel"><label class="cb-label" for="cb-rebel"><input id="cb-rebel" type="checkbox" name="mood" value="rebel"><span class="txt">rebel</span></label></li>
+        <li class="cb-item" data-label="gritty"><label class="cb-label" for="cb-gritty"><input id="cb-gritty" type="checkbox" name="mood" value="gritty"><span class="txt">gritty</span></label></li>
+        <li class="cb-item" data-label="dark & stormy"><label class="cb-label" for="cb-dark-and-stormy"><input id="cb-dark-and-stormy" type="checkbox" name="mood" value="dark-and-stormy"><span class="txt">dark &amp; stormy</span></label></li>
+        <li class="cb-item" data-label="mystique"><label class="cb-label" for="cb-mystique"><input id="cb-mystique" type="checkbox" name="mood" value="mystique"><span class="txt">mystique</span></label></li>
+      </ul></fieldset>
+
+      <!-- Cultural & Global Vibes -->
+      <fieldset class="cb-group"><legend>Cultural &amp; Global Vibes</legend><ul class="cb-list">
+        <li class="cb-item" data-label="latin heat"><label class="cb-label" for="cb-latin-heat"><input id="cb-latin-heat" type="checkbox" name="mood" value="latin-heat"><span class="txt">latin heat</span></label></li>
+        <li class="cb-item" data-label="afrobeats sunshine"><label class="cb-label" for="cb-afrobeats-sunshine"><input id="cb-afrobeats-sunshine" type="checkbox" name="mood" value="afrobeats-sunshine"><span class="txt">afrobeats sunshine</span></label></li>
+        <li class="cb-item" data-label="reggaeton party"><label class="cb-label" for="cb-reggaeton-party"><input id="cb-reggaeton-party" type="checkbox" name="mood" value="reggaeton-party"><span class="txt">reggaeton party</span></label></li>
+        <li class="cb-item" data-label="k-pop spark"><label class="cb-label" for="cb-k-pop-spark"><input id="cb-k-pop-spark" type="checkbox" name="mood" value="k-pop-spark"><span class="txt">k-pop spark</span></label></li>
+        <li class="cb-item" data-label="french café"><label class="cb-label" for="cb-french-cafe"><input id="cb-french-cafe" type="checkbox" name="mood" value="french-cafe"><span class="txt">french café</span></label></li>
+        <li class="cb-item" data-label="mediterranean breeze"><label class="cb-label" for="cb-mediterranean-breeze"><input id="cb-mediterranean-breeze" type="checkbox" name="mood" value="mediterranean-breeze"><span class="txt">mediterranean breeze</span></label></li>
+        <li class="cb-item" data-label="bollywood glow"><label class="cb-label" for="cb-bollywood-glow"><input id="cb-bollywood-glow" type="checkbox" name="mood" value="bollywood-glow"><span class="txt">bollywood glow</span></label></li>
+        <li class="cb-item" data-label="brazilian groove"><label class="cb-label" for="cb-brazilian-groove"><input id="cb-brazilian-groove" type="checkbox" name="mood" value="brazilian-groove"><span class="txt">brazilian groove</span></label></li>
+        <li class="cb-item" data-label="caribbean chill"><label class="cb-label" for="cb-caribbean-chill"><input id="cb-caribbean-chill" type="checkbox" name="mood" value="caribbean-chill"><span class="txt">caribbean chill</span></label></li>
+      </ul></fieldset>
+
+      <!-- Special Moments -->
+      <fieldset class="cb-group"><legend>Special Moments</legend><ul class="cb-list">
+        <li class="cb-item" data-label="getting ready"><label class="cb-label" for="cb-getting-ready"><input id="cb-getting-ready" type="checkbox" name="mood" value="getting-ready"><span class="txt">getting ready</span></label></li>
+        <li class="cb-item" data-label="pre-game"><label class="cb-label" for="cb-pre-game"><input id="cb-pre-game" type="checkbox" name="mood" value="pre-game"><span class="txt">pre-game</span></label></li>
+        <li class="cb-item" data-label="celebration"><label class="cb-label" for="cb-celebration"><input id="cb-celebration" type="checkbox" name="mood" value="celebration"><span class="txt">celebration</span></label></li>
+        <li class="cb-item" data-label="birthday vibes"><label class="cb-label" for="cb-birthday-vibes"><input id="cb-birthday-vibes" type="checkbox" name="mood" value="birthday-vibes"><span class="txt">birthday vibes</span></label></li>
+        <li class="cb-item" data-label="engagement feels"><label class="cb-label" for="cb-engagement-feels"><input id="cb-engagement-feels" type="checkbox" name="mood" value="engagement-feels"><span class="txt">engagement feels</span></label></li>
+        <li class="cb-item" data-label="wedding slow dance"><label class="cb-label" for="cb-wedding-slow-dance"><input id="cb-wedding-slow-dance" type="checkbox" name="mood" value="wedding-slow-dance"><span class="txt">wedding slow dance</span></label></li>
+        <li class="cb-item" data-label="study break"><label class="cb-label" for="cb-study-break"><input id="cb-study-break" type="checkbox" name="mood" value="study-break"><span class="txt">study break</span></label></li>
+        <li class="cb-item" data-label="sunday reset"><label class="cb-label" for="cb-sunday-reset"><input id="cb-sunday-reset" type="checkbox" name="mood" value="sunday-reset"><span class="txt">sunday reset</span></label></li>
+        <li class="cb-item" data-label="clean & declutter"><label class="cb-label" for="cb-clean-and-declutter"><input id="cb-clean-and-declutter" type="checkbox" name="mood" value="clean-and-declutter"><span class="txt">clean &amp; declutter</span></label></li>
+        <li class="cb-item" data-label="cozy gaming"><label class="cb-label" for="cb-cozy-gaming"><input id="cb-cozy-gaming" type="checkbox" name="mood" value="cozy-gaming"><span class="txt">cozy gaming</span></label></li>
+      </ul></fieldset>
+    </div>
+
+    <small class="hint">Tip: filter, select all visible, then remove any tags you don't want below.</small>
+    <div class="tags" id="mood-multi-tags"></div>
+
+    <label for="genre">Genre (optional)</label>
+    <input id="genre" name="genre" placeholder="e.g. house" />
+
+    <label for="limit">Count</label>
+    <input id="limit" name="limit" type="number" value="20" min="5" max="100" />
+
+    <p class="actions">
+      <button type="submit">Generate Playlist</button>
+      <button type="button" id="reset-filter">Reset filter</button>
+    </p>
+  </form>
+
+  <div id="out"></div>
+
+  <script>
+    // ---------- Multiple-choice UI logic ----------
+    const form = document.getElementById('f');
+    const out = document.getElementById('out');
+    const filter = document.getElementById('mood-filter');
+    const cbContainer = document.getElementById('cb-container');
+    const tagsWrap = document.getElementById('mood-multi-tags');
+
+    function cbInputs() { return cbContainer.querySelectorAll('input[type="checkbox"][name="mood"]'); }
+
+    function syncRowStates() {
+      cbInputs().forEach(cb => {
+        cb.closest('.cb-item').querySelector('.cb-label')
+          .classList.toggle('is-checked', cb.checked);
+      });
+    }
+
+    function renderTags() {
+      tagsWrap.innerHTML = '';
+      const checked = [...cbInputs()].filter(cb => cb.checked);
+      checked.forEach(cb => {
+        const labelText = cb.closest('.cb-item').querySelector('.txt').textContent;
+        const tag = document.createElement('span');
+        tag.className = 'tag';
+        tag.innerHTML = `<span>${labelText}</span><button aria-label="Remove ${labelText}">&times;</button>`;
+        tag.querySelector('button').addEventListener('click', () => {
+          cb.checked = false; syncRowStates(); renderTags();
+        });
+        tagsWrap.appendChild(tag);
+      });
+    }
+
+    // filter list
+    function filterCheckboxes(q) {
+      const needle = q.trim().toLowerCase();
+      cbContainer.querySelectorAll('.cb-group').forEach(group => {
+        let anyVisible = false;
+        group.querySelectorAll('.cb-item').forEach(item => {
+          const visible = !needle || item.dataset.label.includes(needle);
+          item.classList.toggle('hidden', !visible);
+          if (visible) anyVisible = true;
+        });
+        group.classList.toggle('hidden', !anyVisible);
+      });
+    }
+
+    filter.addEventListener('input', () => filterCheckboxes(filter.value));
+    document.getElementById('reset-filter').addEventListener('click', () => {
+      filter.value = ''; filterCheckboxes('');
+    });
+
+    // select/clear helpers
+    document.getElementById('select-all-visible').addEventListener('click', () => {
+      cbContainer.querySelectorAll('.cb-item:not(.hidden) input[type="checkbox"][name="mood"]').forEach(cb => cb.checked = true);
+      syncRowStates(); renderTags();
+    });
+    document.getElementById('clear-multi').addEventListener('click', () => {
+      cbInputs().forEach(cb => cb.checked = false);
+      syncRowStates(); renderTags();
+    });
+
+    // reflect selection in row + tags
+    cbInputs().forEach(cb => cb.addEventListener('change', () => { syncRowStates(); renderTags(); }));
+    syncRowStates();
+
+    // Submit to your API (unchanged)
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      out.textContent = 'Creating...';
+
+      const fd = new FormData(form); // multiple "mood" fields supported
+      try {
+        const res = await fetch('/api/playlist', {
+          method: 'POST',
+          body: fd,
+          credentials: 'include',
+          cache: 'no-store'
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || JSON.stringify(data));
+        out.innerHTML = `
+          <p>Added <b>${data.added}</b> tracks.</p>
+          <p>Playlist: <a href="${data.playlist_url}" target="_blank" rel="noopener">open on Spotify</a></p>
+          <p>Sample:</p>
+          <ul>${(data.sample_titles || []).map(t => `<li>${t}</li>`).join('')}</ul>
+          <p>Seeds: <code>${(JSON.stringify(data.used_seeds || {}))}</code></p>
+        `;
+      } catch (err) {
+        out.innerHTML = `<p style="color:#b00">Error: ${err.message}</p>`;
+      }
+    });
+  </script>
+</body>
+</html>
