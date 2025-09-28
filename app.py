@@ -39,7 +39,15 @@ API_BASE = "https://api.spotify.com/v1"
 # Feature flags / defaults
 DISABLE_RECS = os.getenv("NO_RECS", "").lower() in ("1", "true", "yes")
 DEFAULT_GENRES = [
-    "pop", "rock", "dance", "edm", "house", "hip-hop", "indie", "r-n-b", "soul",
+    "pop",
+    "rock",
+    "dance",
+    "edm",
+    "house",
+    "hip-hop",
+    "indie",
+    "r-n-b",
+    "soul",
 ]
 
 # -----------------------------
@@ -49,7 +57,9 @@ app = FastAPI(title="MoodPlaylists")
 
 BASE_DIR = Path(__file__).resolve().parent
 STATIC_DIR = BASE_DIR / "static"
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR), check_dir=False), name="static")
+app.mount(
+    "/static", StaticFiles(directory=str(STATIC_DIR), check_dir=False), name="static"
+)
 
 signer = URLSafeSerializer(APP_SECRET, salt="session")
 
@@ -89,7 +99,9 @@ def get_user_id_from_cookie(request: Request) -> str:
     try:
         return signer.loads(user_cookie)
     except Exception:
-        raise HTTPException(status_code=401, detail="Invalid session. Please login again.")
+        raise HTTPException(
+            status_code=401, detail="Invalid session. Please login again."
+        )
 
 
 # -----------------------------
@@ -184,7 +196,9 @@ def _api_post(
     return r.json() if r.text else {}
 
 
-def create_playlist_with_tracks(access_token: str, user_id: str, name: str, uris: list[str]) -> dict:
+def create_playlist_with_tracks(
+    access_token: str, user_id: str, name: str, uris: list[str]
+) -> dict:
     pl = _api_post(
         access_token,
         f"/users/{user_id}/playlists",
@@ -199,7 +213,7 @@ def create_playlist_with_tracks(access_token: str, user_id: str, name: str, uris
             _api_post(
                 access_token,
                 f"/playlists/{pl['id']}/tracks",
-                json_body={"uris": uris[i:i+100]},
+                json_body={"uris": uris[i : i + 100]},
             )
     return pl
 
@@ -294,13 +308,14 @@ MOOD_PRESETS: Dict[str, Dict[str, float]] = {
     },
 }
 
+
 # === Fallback helpers ===
 def _get_audio_features(access_token: str, track_ids: list[str]) -> dict[str, dict]:
     feats: dict[str, dict] = {}
     if not track_ids:
         return feats
     for i in range(0, len(track_ids), 100):
-        ids = ",".join(track_ids[i:i+100])
+        ids = ",".join(track_ids[i : i + 100])
         r = _api_get(access_token, "/audio-features", {"ids": ids})
         for f in r.get("audio_features", []) or []:
             if f:
@@ -321,7 +336,9 @@ def _within_preset(features: dict, preset: dict) -> bool:
     return True
 
 
-def _fallback_from_top_tracks(access_token: str, preset: dict, limit: int = 20) -> list[dict]:
+def _fallback_from_top_tracks(
+    access_token: str, preset: dict, limit: int = 20
+) -> list[dict]:
     try:
         top = _api_get(access_token, "/me/top/tracks", {"limit": 50})
         items = top.get("items") or []
@@ -348,19 +365,27 @@ def _fallback_from_genre_playlist(
         q = (genre or "").strip()
         if not q:
             return []
-        search = _api_get(access_token, "/search", {
-            "q": q, "type": "playlist", "limit": 5, "market": "from_token"
-        })
-        playlists = ((search.get("playlists") or {}).get("items") or [])
+        search = _api_get(
+            access_token,
+            "/search",
+            {"q": q, "type": "playlist", "limit": 5, "market": "from_token"},
+        )
+        playlists = (search.get("playlists") or {}).get("items") or []
         if not playlists:
             return []
         first_nonempty: list[dict] = []
         for pl in playlists:
             pid = pl["id"]
-            pl_tracks = _api_get(access_token, f"/playlists/{pid}/tracks", {
-                "limit": 100, "market": "from_token"
-            })
-            items = [it.get("track") for it in (pl_tracks.get("items") or []) if it.get("track")]
+            pl_tracks = _api_get(
+                access_token,
+                f"/playlists/{pid}/tracks",
+                {"limit": 100, "market": "from_token"},
+            )
+            items = [
+                it.get("track")
+                for it in (pl_tracks.get("items") or [])
+                if it.get("track")
+            ]
             if items and not first_nonempty:
                 first_nonempty = items
             ids = [t.get("id") for t in items if t and t.get("id")]
@@ -379,15 +404,18 @@ def _fallback_from_genre_playlist(
         return []
 
 
-def _direct_search_by_genre(access_token: str, q: str, preset: dict, limit: int) -> list[dict]:
+def _direct_search_by_genre(
+    access_token: str, q: str, preset: dict, limit: int
+) -> list[dict]:
     """Search tracks by a keyword with mood filtering + market fallbacks."""
+
     def _search_tracks(market: str | None) -> list[dict]:
         params = {"q": q, "type": "track", "limit": 50}
         if market is not None:
             params["market"] = market
         try:
             res = _api_get(access_token, "/search", params)
-            return ((res.get("tracks") or {}).get("items") or [])
+            return (res.get("tracks") or {}).get("items") or []
         except Exception:
             return []
 
@@ -435,21 +463,41 @@ def build_recommendations(
     if DISABLE_RECS:
         tt = _fallback_from_top_tracks(access_token, preset, limit)
         if tt:
-            return {"tracks": tt[:limit], "seeds": {"artists": [], "tracks": ["from_top_tracks"], "genres": []}}
+            return {
+                "tracks": tt[:limit],
+                "seeds": {"artists": [], "tracks": ["from_top_tracks"], "genres": []},
+            }
 
-        g = (genre or random.choice(DEFAULT_GENRES))
+        g = genre or random.choice(DEFAULT_GENRES)
         gp = _fallback_from_genre_playlist(access_token, g, preset, limit)
         if gp:
-            return {"tracks": gp[:limit], "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [g]}}
+            return {
+                "tracks": gp[:limit],
+                "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [g]},
+            }
 
         gp = _fallback_from_genre_playlist(access_token, (genre or "pop"), {}, limit)
         if gp:
-            return {"tracks": gp[:limit], "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [genre or "pop"]}}
+            return {
+                "tracks": gp[:limit],
+                "seeds": {
+                    "artists": [],
+                    "tracks": ["from_playlist"],
+                    "genres": [genre or "pop"],
+                },
+            }
 
         keyword = genre or random.choice(DEFAULT_GENRES)
         direct = _direct_search_by_genre(access_token, keyword, preset, limit)
         if direct:
-            return {"tracks": direct, "seeds": {"artists": [], "tracks": [], "genres": [genre or "keyword_search"]}}
+            return {
+                "tracks": direct,
+                "seeds": {
+                    "artists": [],
+                    "tracks": [],
+                    "genres": [genre or "keyword_search"],
+                },
+            }
 
         return {"tracks": [], "seeds": {"artists": [], "tracks": [], "genres": []}}
 
@@ -500,31 +548,56 @@ def build_recommendations(
 
     # attempt 2: genre-only
     try:
-        picked = [genre.lower()] if genre else random.sample(DEFAULT_GENRES, k=min(3, len(DEFAULT_GENRES)))
+        picked = (
+            [genre.lower()]
+            if genre
+            else random.sample(DEFAULT_GENRES, k=min(3, len(DEFAULT_GENRES)))
+        )
         fallback_params = {"limit": limit, "seed_genres": ",".join(picked)}
         tracks = _recs_with_market_fallback(access_token, fallback_params)
         if tracks:
-            return {"tracks": tracks, "seeds": {"artists": [], "tracks": [], "genres": picked}}
+            return {
+                "tracks": tracks,
+                "seeds": {"artists": [], "tracks": [], "genres": picked},
+            }
     except Exception:
         pass
 
     tt = _fallback_from_top_tracks(access_token, preset, limit)
     if tt:
-        return {"tracks": tt[:limit], "seeds": {"artists": [], "tracks": ["from_top_tracks"], "genres": []}}
+        return {
+            "tracks": tt[:limit],
+            "seeds": {"artists": [], "tracks": ["from_top_tracks"], "genres": []},
+        }
 
     g = genre or random.choice(DEFAULT_GENRES)
     gp = _fallback_from_genre_playlist(access_token, g, preset, limit)
     if gp:
-        return {"tracks": gp[:limit], "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [g]}}
+        return {
+            "tracks": gp[:limit],
+            "seeds": {"artists": [], "tracks": ["from_playlist"], "genres": [g]},
+        }
 
-    plain_tracks = _recs_with_market_fallback(access_token, {"limit": limit, "seed_genres": "pop"})
+    plain_tracks = _recs_with_market_fallback(
+        access_token, {"limit": limit, "seed_genres": "pop"}
+    )
     if plain_tracks:
-        return {"tracks": plain_tracks, "seeds": {"artists": [], "tracks": [], "genres": ["pop"]}}
+        return {
+            "tracks": plain_tracks,
+            "seeds": {"artists": [], "tracks": [], "genres": ["pop"]},
+        }
 
     keyword = genre or random.choice(DEFAULT_GENRES)
     direct = _direct_search_by_genre(access_token, keyword, preset, limit)
     if direct:
-        return {"tracks": direct, "seeds": {"artists": [], "tracks": [], "genres": [genre or "keyword_search"]}}
+        return {
+            "tracks": direct,
+            "seeds": {
+                "artists": [],
+                "tracks": [],
+                "genres": [genre or "keyword_search"],
+            },
+        }
 
     return {"tracks": [], "seeds": {"artists": [], "tracks": [], "genres": []}}
 
@@ -533,11 +606,16 @@ def build_recommendations(
 # DYNAMIC SPOTIFY DATA (genres / mood labels)
 # -----------------------------
 @app.get("/api/spotify/genre-seeds")
-def api_spotify_genre_seeds(request: Request, refresh: bool = False, ttl_seconds: int = 86400):
+def api_spotify_genre_seeds(
+    request: Request, refresh: bool = False, ttl_seconds: int = 86400
+):
     """Returns Spotify's /recommendations/available-genre-seeds (cached for 24h)."""
     # Return cached or mock when available
     if MOCK_MODE:
-        return {"fetched_at": _now(), "genres": ["pop", "rock", "dance", "electronic", "hip-hop", "indie"]}
+        return {
+            "fetched_at": _now(),
+            "genres": ["pop", "rock", "dance", "electronic", "hip-hop", "indie"],
+        }
 
     if not refresh:
         cached = _cache_read("genre_seeds.json")
@@ -561,25 +639,39 @@ def api_spotify_mood_labels(request: Request, country: str = "US", limit: int = 
     """
     # In MOCK_MODE return a small curated list useful for UI testing
     if MOCK_MODE:
-        return {"labels": ["chill", "happy", "focus", "workout", "melancholic"], "category_found": False, "country": country}
+        return {
+            "labels": ["chill", "happy", "focus", "workout", "melancholic"],
+            "category_found": False,
+            "country": country,
+        }
 
     user_id = get_user_id_from_cookie(request)
     tok = _ensure_token(user_id)
 
     cats = _api_get(tok, "/browse/categories", {"country": country, "limit": 50})
-    items = ((cats.get("categories") or {}).get("items") or [])
+    items = (cats.get("categories") or {}).get("items") or []
     mood = next((c for c in items if c.get("id") == "mood"), None)
     if not mood:
         return {"labels": [], "category_found": False}
 
-    pls = _api_get(tok, f"/browse/categories/{mood['id']}/playlists",
-                   {"country": country, "limit": max(1, min(limit, 50))})
-    names = sorted({
-        (p.get("name") or "").strip()
-        for p in ((pls.get("playlists") or {}).get("items") or [])
-        if p and p.get("name")
-    })
-    return {"labels": names, "category_found": True, "category_id": mood["id"], "country": country}
+    pls = _api_get(
+        tok,
+        f"/browse/categories/{mood['id']}/playlists",
+        {"country": country, "limit": max(1, min(limit, 50))},
+    )
+    names = sorted(
+        {
+            (p.get("name") or "").strip()
+            for p in ((pls.get("playlists") or {}).get("items") or [])
+            if p and p.get("name")
+        }
+    )
+    return {
+        "labels": names,
+        "category_found": True,
+        "category_id": mood["id"],
+        "country": country,
+    }
 
 
 # -----------------------------
@@ -608,7 +700,9 @@ def home():
 
 
 @app.get("/login")
-def login(request: Request, switch: bool = Query(False), show_dialog: bool = Query(False)):
+def login(
+    request: Request, switch: bool = Query(False), show_dialog: bool = Query(False)
+):
     """
     If switch=1, force the Spotify chooser. Stores a signed 'state' cookie for CSRF.
     """
@@ -620,12 +714,14 @@ def login(request: Request, switch: bool = Query(False), show_dialog: bool = Que
         "client_id": CLIENT_ID,
         "response_type": "code",
         "redirect_uri": REDIRECT_URI,
-        "scope": " ".join([
-            "user-read-private",
-            "user-top-read",
-            "playlist-modify-public",
-            "playlist-modify-private",
-        ]),
+        "scope": " ".join(
+            [
+                "user-read-private",
+                "user-top-read",
+                "playlist-modify-public",
+                "playlist-modify-private",
+            ]
+        ),
         "state": state,
         "show_dialog": "true" if show_dialog else "false",
     }
@@ -645,9 +741,13 @@ def callback(request: Request, code: str | None = None, state: str | None = None
     try:
         expected = signer.loads(cookie_state) if cookie_state else None
     except BadSignature:
-        return JSONResponse({"stage": "state_check", "error": "bad_state_cookie"}, status_code=400)
+        return JSONResponse(
+            {"stage": "state_check", "error": "bad_state_cookie"}, status_code=400
+        )
     if not expected or state != expected:
-        return JSONResponse({"stage": "state_check", "error": "state_mismatch"}, status_code=400)
+        return JSONResponse(
+            {"stage": "state_check", "error": "state_mismatch"}, status_code=400
+        )
 
     # Exchange code for tokens
     r = requests.post(
@@ -663,17 +763,31 @@ def callback(request: Request, code: str | None = None, state: str | None = None
     )
     if r.status_code != 200:
         return JSONResponse(
-            {"stage": "auth_code_exchange", "status": r.status_code, "body": r.text[:300]},
+            {
+                "stage": "auth_code_exchange",
+                "status": r.status_code,
+                "body": r.text[:300],
+            },
             status_code=502,
         )
     try:
         tok = r.json()
     except Exception:
-        return JSONResponse({"stage": "auth_code_exchange", "parse_error": r.text[:300]}, status_code=502)
+        return JSONResponse(
+            {"stage": "auth_code_exchange", "parse_error": r.text[:300]},
+            status_code=502,
+        )
 
     access_token = tok.get("access_token")
     if not access_token:
-        return JSONResponse({"stage": "auth_code_exchange", "error": "missing_access_token", "raw": tok}, status_code=502)
+        return JSONResponse(
+            {
+                "stage": "auth_code_exchange",
+                "error": "missing_access_token",
+                "raw": tok,
+            },
+            status_code=502,
+        )
     refresh_token_new = tok.get("refresh_token")  # may be None on re-consent
     expires_at = int(time.time()) + int(tok.get("expires_in", 3600))
 
@@ -749,14 +863,22 @@ async def api_playlist(request: Request):
 
         # Mock-mode shortcut
         if MOCK_MODE:
-            sample_titles = [f"{mood.title()} Song {i+1} — Artist" for i in range(min(5, limit))]
-            return JSONResponse({
-                "playlist_id": f"mock-{int(time.time())}",
-                "playlist_url": None,
-                "added": limit,
-                "used_seeds": {"artists": [], "tracks": [], "genres": [genre] if genre else []},
-                "sample_titles": sample_titles,
-            })
+            sample_titles = [
+                f"{mood.title()} Song {i+1} — Artist" for i in range(min(5, limit))
+            ]
+            return JSONResponse(
+                {
+                    "playlist_id": f"mock-{int(time.time())}",
+                    "playlist_url": None,
+                    "added": limit,
+                    "used_seeds": {
+                        "artists": [],
+                        "tracks": [],
+                        "genres": [genre] if genre else [],
+                    },
+                    "sample_titles": sample_titles,
+                }
+            )
 
         user_id = get_user_id_from_cookie(request)
         tok = _ensure_token(user_id)
@@ -766,7 +888,10 @@ async def api_playlist(request: Request):
         uris = [t["uri"] for t in tracks if t.get("uri")]
 
         if not tracks:
-            raise HTTPException(status_code=502, detail="Spotify returned no recommendations. Try another mood/genre.")
+            raise HTTPException(
+                status_code=502,
+                detail="Spotify returned no recommendations. Try another mood/genre.",
+            )
 
         me = _api_get(tok, "/me")
         playlist = create_playlist_with_tracks(
@@ -790,6 +915,7 @@ async def api_playlist(request: Request):
         raise
     except Exception as e:
         import traceback
+
         return JSONResponse(
             {"error": "Internal", "detail": str(e), "trace": traceback.format_exc()},
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -810,7 +936,9 @@ def _debug_env():
 
 
 @app.get("/_debug_recs")
-def _debug_recs(request: Request, mood: str = "happy", genre: str | None = None, limit: int = 20):
+def _debug_recs(
+    request: Request, mood: str = "happy", genre: str | None = None, limit: int = 20
+):
     user_id = get_user_id_from_cookie(request)
     tok = _ensure_token(user_id)
     result = build_recommendations(tok, mood=mood, genre=genre, limit=limit)
@@ -822,7 +950,11 @@ def _debug_recs(request: Request, mood: str = "happy", genre: str | None = None,
         }
         for t in result.get("tracks", [])[:5]
     ]
-    return {"used_seeds": result.get("seeds"), "sample": sample, "count": len(result.get("tracks", []))}
+    return {
+        "used_seeds": result.get("seeds"),
+        "sample": sample,
+        "count": len(result.get("tracks", [])),
+    }
 
 
 @app.get("/_probe_me")
@@ -850,11 +982,17 @@ def _probe_plain(request: Request, limit: int = 5):
         try:
             data = _api_get(tok, "/recommendations", params)
             tracks = data.get("tracks") or []
-            out[label] = {"count": len(tracks), "sample": [t.get("name") for t in tracks[:3]], "params": params}
+            out[label] = {
+                "count": len(tracks),
+                "sample": [t.get("name") for t in tracks[:3]],
+                "params": params,
+            }
         except HTTPException as e:
             out[label] = {"error": e.detail, "params": params}
 
-    attempt("from_token", {"limit": limit, "seed_genres": "pop", "market": "from_token"})
+    attempt(
+        "from_token", {"limit": limit, "seed_genres": "pop", "market": "from_token"}
+    )
     attempt("PT", {"limit": limit, "seed_genres": "pop", "market": "PT"})
     attempt("no_market", {"limit": limit, "seed_genres": "pop"})
     attempt("US", {"limit": limit, "seed_genres": "pop", "market": "US"})
@@ -869,7 +1007,7 @@ def _probe_sanity(request: Request):
 
     try:
         top = _api_get(tok, "/me/top/tracks", {"limit": 1})
-        items = (top.get("items") or [])
+        items = top.get("items") or []
         if items:
             tid = items[0]["id"]
             data = _api_get(tok, "/recommendations", {"limit": 5, "seed_tracks": tid})
@@ -900,11 +1038,15 @@ def _probe_search(request: Request, q: str = "pop", limit: int = 3):
     out = {"query": q, "playlists_found": 0, "samples": []}
 
     try:
-        search = _api_get(tok, "/search", {"q": q, "type": "playlist", "limit": limit, "market": "from_token"})
+        search = _api_get(
+            tok,
+            "/search",
+            {"q": q, "type": "playlist", "limit": limit, "market": "from_token"},
+        )
     except HTTPException as e:
         return {"search_error": e.detail}
 
-    playlists = (((search or {}).get("playlists") or {}).get("items") or [])
+    playlists = ((search or {}).get("playlists") or {}).get("items") or []
     out["playlists_found"] = len(playlists)
 
     for pl in playlists:
@@ -916,15 +1058,25 @@ def _probe_search(request: Request, q: str = "pop", limit: int = 3):
             continue
 
         try:
-            tr_resp = _api_get(tok, f"/playlists/{pid}/tracks", {"limit": 5, "market": "from_token"})
+            tr_resp = _api_get(
+                tok, f"/playlists/{pid}/tracks", {"limit": 5, "market": "from_token"}
+            )
             items = tr_resp.get("items") or []
-            tracks = [it.get("track") for it in items if isinstance(it, dict) and it.get("track")]
-            out["samples"].append({
-                "playlist": name,
-                "pid": pid,
-                "count": len(tracks),
-                "sample": [t.get("name") for t in tracks[:3] if isinstance(t, dict)],
-            })
+            tracks = [
+                it.get("track")
+                for it in items
+                if isinstance(it, dict) and it.get("track")
+            ]
+            out["samples"].append(
+                {
+                    "playlist": name,
+                    "pid": pid,
+                    "count": len(tracks),
+                    "sample": [
+                        t.get("name") for t in tracks[:3] if isinstance(t, dict)
+                    ],
+                }
+            )
         except HTTPException as e:
             out["samples"].append({"playlist": name, "pid": pid, "error": e.detail})
 
@@ -933,4 +1085,5 @@ def _probe_search(request: Request, q: str = "pop", limit: int = 3):
 
 if __name__ == "__main__":
     import uvicorn
+
     uvicorn.run(app, host="127.0.0.1", port=8001, reload=True)

@@ -1,0 +1,19 @@
+# Codecov configuration for MoodChanger_music
+# This file tells Codecov how to interpret coverage reports and how to
+# compute status. It's optional but helps make uploads deterministic.
+
+coverage:
+  precision: 2
+  round: down
+  range: 5
+
+status:
+  project:
+    default:
+      target: 80%
+  patch:
+    default:
+      target: 80%
+
+# We don't need language-specific settings here; just ensure Codecov
+# looks for the generated coverage.xml file uploaded by CI.

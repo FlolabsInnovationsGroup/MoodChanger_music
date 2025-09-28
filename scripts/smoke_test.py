@@ -5,6 +5,7 @@ Runs a few requests using FastAPI's TestClient to validate endpoints without tal
 Usage:
     Set MOCK_MODE=1 in your environment and run this file with Python.
 """
+
 from fastapi.testclient import TestClient
 import os
 import sys
@@ -15,14 +16,14 @@ from app import app
 
 client = TestClient(app)
 
-print('Testing /api/spotify/genre-seeds')
-resp = client.get('/api/spotify/genre-seeds')
+print("Testing /api/spotify/genre-seeds")
+resp = client.get("/api/spotify/genre-seeds")
 print(resp.status_code, resp.json())
 
-print('Testing /api/spotify/mood-labels')
-resp = client.get('/api/spotify/mood-labels')
+print("Testing /api/spotify/mood-labels")
+resp = client.get("/api/spotify/mood-labels")
 print(resp.status_code, resp.json())
 
-print('Testing POST /api/playlist')
-resp = client.post('/api/playlist', data={'mood': 'chill', 'limit': '5'})
+print("Testing POST /api/playlist")
+resp = client.post("/api/playlist", data={"mood": "chill", "limit": "5"})
 print(resp.status_code, resp.json())
